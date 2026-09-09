@@ -1,0 +1,5 @@
+# Force LF in the repo regardless of contributor OS — Docker containers
+# run Linux, and CRLF in a shell script silently breaks with a
+# "bad interpreter" error. This makes it repo-enforced rather than
+# depending on everyone's local core.autocrlf setting.
+* text=auto eol=lf

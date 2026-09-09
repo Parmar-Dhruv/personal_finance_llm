@@ -1,0 +1,27 @@
+# Versions intentionally left unpinned to exact patch numbers for this scaffold.
+# Run `pip freeze > requirements.lock.txt` after first successful install and
+# commit the lockfile — don't trust any version numbers here as verified.
+
+fastapi
+uvicorn[standard]
+pydantic-settings
+email-validator
+sqlalchemy
+psycopg[binary]
+alembic
+pgvector
+celery
+redis
+boto3
+python-multipart
+anthropic
+voyageai
+
+# --- Auth ---
+# pwdlib, not passlib: passlib has been unmaintained since 2020, breaks on
+# Python 3.13+, and broke again against bcrypt>=5.0 (Oct 2025). pwdlib is
+# FastAPI's current official recommendation, defaulting to Argon2id.
+pwdlib[argon2]
+# PyJWT, not python-jose: python-jose's last release is ~3 years stale.
+# PyJWT is actively maintained and is all we need (no JWKS/multi-IdP here).
+pyjwt

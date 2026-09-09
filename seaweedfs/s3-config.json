@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "finsight",
+      "credentials": [
+        {
+          "accessKey": "finsight-dev-access-key",
+          "secretKey": "finsight-dev-secret-key-change-me"
+        }
+      ],
+      "actions": ["Admin", "Read", "List", "Tagging", "Write"]
+    }
+  ]
+}

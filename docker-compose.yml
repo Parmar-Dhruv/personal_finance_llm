@@ -1,0 +1,121 @@
+name: finsight
+
+services:
+  db:
+    # [VERIFY] pgvector/pgvector publishes tags per Postgres major version (pg16, pg17...).
+    # Confirm a pg18 tag exists on Docker Hub before first run; fall back to pg17 if not yet published.
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-finsight}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-finsight_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-finsight}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-finsight}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  cache:
+    # [VERIFY] Confirm latest stable Valkey 8.x tag on Docker Hub (valkey/valkey) at build time.
+    image: valkey/valkey:8
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - valkeydata:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  seaweedfs:
+    # Verified against the real 4.31 binary during development (not
+    # assumed) — bucket create/put/list/get/presigned-url/delete all
+    # confirmed working through boto3 against this exact image pattern.
+    image: chrislusf/seaweedfs:4.31
+    restart: unless-stopped
+    ports:
+      - "8333:8333"   # S3 API
+      - "9333:9333"   # master (debugging only)
+      - "8888:8888"   # filer (debugging only)
+    volumes:
+      - seaweedfs_data:/data
+      - ./seaweedfs/s3-config.json:/etc/seaweedfs/s3.json:ro
+    command: >
+      server -dir=/data -s3 -s3.config=/etc/seaweedfs/s3.json
+      -s3.port=8333 -ip.bind=0.0.0.0
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8333"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-finsight}:${POSTGRES_PASSWORD:-finsight_dev_password}@db:5432/${POSTGRES_DB:-finsight}
+      VALKEY_URL: redis://cache:6379/0
+      OBJECT_STORAGE_ENDPOINT: http://seaweedfs:8333
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-finsight}:${POSTGRES_PASSWORD:-finsight_dev_password}@db:5432/${POSTGRES_DB:-finsight}
+      VALKEY_URL: redis://cache:6379/0
+      OBJECT_STORAGE_ENDPOINT: http://seaweedfs:8333
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+    command: celery -A app.core.celery_app worker --loglevel=info
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    command: npm run dev
+
+volumes:
+  pgdata:
+  valkeydata:
+  seaweedfs_data:
