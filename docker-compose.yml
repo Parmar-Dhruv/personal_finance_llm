@@ -13,7 +13,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-finsight}"]
       interval: 5s
@@ -51,10 +51,11 @@ services:
       server -dir=/data -s3 -s3.config=/etc/seaweedfs/s3.json
       -s3.port=8333 -ip.bind=0.0.0.0
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8333"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9333/cluster/status"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 10s
 
   backend:
     build:
