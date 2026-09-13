@@ -4,6 +4,7 @@ services:
   db:
     # [VERIFY] pgvector/pgvector publishes tags per Postgres major version (pg16, pg17...).
     # Confirm a pg18 tag exists on Docker Hub before first run; fall back to pg17 if not yet published.
+    # [VERIFIED]
     image: pgvector/pgvector:pg18
     restart: unless-stopped
     environment:
@@ -22,6 +23,7 @@ services:
 
   cache:
     # [VERIFY] Confirm latest stable Valkey 8.x tag on Docker Hub (valkey/valkey) at build time.
+    # [VERIFIED]
     image: valkey/valkey:8
     restart: unless-stopped
     ports:
