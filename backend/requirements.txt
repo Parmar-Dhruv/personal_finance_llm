@@ -17,6 +17,26 @@ python-multipart
 anthropic
 voyageai
 
+# --- Document intelligence (Phase 2) ---
+# pdfplumber, not PyMuPDF: PyMuPDF is AGPL-3.0 (or paid Artifex commercial
+# license); pdfplumber is MIT. pdfplumber's char/bbox-level model is also
+# the better fit for this project's doc->page->region provenance
+# requirement, not just the safer license. Decided 2026-09-12.
+pdfplumber
+# pypdfium2, not Wand/ImageMagick (pdfplumber's own to_image()) or
+# pdf2image (poppler): rasterizing scanned pages for OCR without pulling
+# in Ghostscript, which is ALSO AGPL. pypdfium2 wraps Google's own PDFium
+# (Apache-2.0/BSD-3-Clause) — zero copyleft anywhere in the pipeline.
+pypdfium2
+# pytesseract + system tesseract-ocr binary (installed via apt in
+# Dockerfile): Apache 2.0, still the standard free OCR baseline in 2026.
+# Confirmed current (5.x); known weakness on noisy/handwritten scans is
+# an accepted gap for now, not a reason to reach for paid cloud OCR yet.
+pytesseract
+Pillow
+pandas
+openpyxl
+
 # --- Auth ---
 # pwdlib, not passlib: passlib has been unmaintained since 2020, breaks on
 # Python 3.13+, and broke again against bcrypt>=5.0 (Oct 2025). pwdlib is

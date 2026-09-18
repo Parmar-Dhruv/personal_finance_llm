@@ -60,6 +60,17 @@ class TransactionType(str, enum.Enum):
     credit = "credit"
 
 
+class ExtractionMethod(str, enum.Enum):
+    # Text came straight out of the PDF's text layer.
+    native_text = "native_text"
+    # Page had no usable text layer (scanned/photographed) — rasterized
+    # via pypdfium2 and run through Tesseract.
+    ocr = "ocr"
+    # CSV/XLSX — parsed directly as rows/columns, no OCR or text-layer
+    # concept applies.
+    tabular = "tabular"
+
+
 class User(TimestampMixin, Base):
     __tablename__ = "users"
 
@@ -147,10 +158,60 @@ class Document(TimestampMixin, Base):
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Populated once Phase 2 extraction runs. NULL until then. For
+    # spreadsheets this counts sheets, not physical pages.
+    page_count: Mapped[int | None] = mapped_column(nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="documents")
     account: Mapped["Account | None"] = relationship(back_populates="documents")
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="source_document")
+    pages: Mapped[list["DocumentPage"]] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+        order_by="DocumentPage.page_number",
+    )
+
+
+class DocumentPage(TimestampMixin, Base):
+    """
+    One row per extracted page (PDF page, image, or spreadsheet sheet).
+    This is the provenance unit the spec calls for: every downstream
+    Transaction row should be traceable back to a specific DocumentPage,
+    not just a Document. Region-level (bbox) provenance within a page is
+    deferred — `tables` stores extracted rows, not yet their coordinates.
+    """
+
+    __tablename__ = "document_pages"
+    __table_args__ = (
+        UniqueConstraint("document_id", "page_number", name="uq_document_page_number"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=PK_DEFAULT
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # 1-indexed. For CSV (single implicit sheet) this is always 1; for
+    # XLSX it's the sheet's position in the workbook.
+    page_number: Mapped[int] = mapped_column(nullable=False)
+    extraction_method: Mapped[ExtractionMethod] = mapped_column(
+        Enum(ExtractionMethod, name="extraction_method"), nullable=False
+    )
+    raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    char_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    # Mean Tesseract word-confidence (0-100). NULL for native_text/tabular
+    # pages, since there's no OCR confidence to report.
+    ocr_confidence: Mapped[float | None] = mapped_column(nullable=True)
+    # List of tables; each table is a list of rows; each row a list of
+    # cell strings. Header row (if any) is just row 0 — not distinguished
+    # at this layer, since that's a normalization-phase concern.
+    tables: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # e.g. "low_ocr_confidence", "empty_page", "truncated_rows",
+    # "decoded_as_latin-1" — surfaced to the user, not silently swallowed.
+    warnings: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
+    document: Mapped["Document"] = relationship(back_populates="pages")
 
 
 class Transaction(TimestampMixin, Base):

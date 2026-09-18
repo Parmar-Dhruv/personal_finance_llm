@@ -54,6 +54,19 @@ def upload_file(storage_key: str, file_obj, content_type: str) -> None:
     )
 
 
+def download_file(storage_key: str) -> bytes:
+    """
+    Pulls the original uploaded bytes back out of object storage so the
+    Phase 2 pipeline can extract from them. The original document is
+    always the source of truth (per the normalization-layer separation
+    principle) — extraction never mutates or re-derives from anything
+    other than this.
+    """
+    client = get_s3_client()
+    response = client.get_object(Bucket=settings.object_storage_bucket, Key=storage_key)
+    return response["Body"].read()
+
+
 def delete_file(storage_key: str) -> None:
     client = get_s3_client()
     client.delete_object(Bucket=settings.object_storage_bucket, Key=storage_key)

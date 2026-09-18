@@ -3,7 +3,7 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
-from app.db.models import DocumentStatus
+from app.db.models import DocumentStatus, ExtractionMethod
 
 
 class DocumentRead(BaseModel):
@@ -13,6 +13,7 @@ class DocumentRead(BaseModel):
     mime_type: str
     status: DocumentStatus
     error_message: str | None
+    page_count: int | None
     created_at: datetime
     processed_at: datetime | None
 
@@ -22,3 +23,16 @@ class DocumentRead(BaseModel):
 class DocumentDownloadURL(BaseModel):
     url: str
     expires_in_seconds: int
+
+
+class DocumentPageRead(BaseModel):
+    id: uuid.UUID
+    page_number: int
+    extraction_method: ExtractionMethod
+    raw_text: str | None
+    char_count: int
+    ocr_confidence: float | None
+    tables: list | None
+    warnings: list[str] | None
+
+    model_config = {"from_attributes": True}

@@ -8,9 +8,9 @@ from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.storage import build_storage_key, delete_file, generate_download_url, upload_file
 from app.db.base import get_db
-from app.db.models import Account, Document, DocumentStatus, User
+from app.db.models import Account, Document, DocumentPage, DocumentStatus, User
 from app.pipeline.tasks import process_document
-from app.schemas.document import DocumentDownloadURL, DocumentRead
+from app.schemas.document import DocumentDownloadURL, DocumentPageRead, DocumentRead
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -118,6 +118,29 @@ def get_download_url(
     expires_in = 300
     url = generate_download_url(document.storage_path, expires_in_seconds=expires_in)
     return DocumentDownloadURL(url=url, expires_in_seconds=expires_in)
+
+
+@router.get("/{document_id}/pages", response_model=list[DocumentPageRead])
+def list_document_pages(
+    document_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[DocumentPage]:
+    """
+    Exposes Phase 2's extraction output directly — this is the evidence
+    layer the spec's explainability requirement calls for (§14: answers
+    should be traceable to source document/page, not just an LLM's say-so).
+    """
+    document = db.get(Document, document_id)
+    if document is None or document.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    stmt = (
+        select(DocumentPage)
+        .where(DocumentPage.document_id == document.id)
+        .order_by(DocumentPage.page_number)
+    )
+    return list(db.execute(stmt).scalars().all())
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)

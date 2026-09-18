@@ -35,7 +35,9 @@ finsight/
       db/ (base.py, models.py)
       schemas/ (auth.py, document.py)
       api/ (auth.py, documents.py, deps.py)
-      pipeline/ (tasks.py)
+      pipeline/
+        tasks.py
+        extractors/ (common.py, ocr.py, pdf.py, image.py, spreadsheet.py)
   frontend/
     package.json, tsconfig.json, next.config.mjs, Dockerfile
     app/ (layout.tsx, page.tsx)
@@ -94,12 +96,14 @@ verified. 🔶 = in progress. ⬜ = not started.
   - ✅ Celery pipeline skeleton (`process_document` stub task — flips
        `uploaded → processing → processed`, no real extraction yet)
   - ✅ Download endpoints (list, get, presigned URL, delete)
-- **Phase 2 — Document Intelligence** ⬜ *(next up)*
-  - ⬜ Text/table extraction for native PDFs/CSV/XLSX
-  - ⬜ OCR for scanned docs (Tesseract baseline; eval decides if cloud OCR needed)
-  - ⬜ Field identification + confidence scoring
-  - ⬜ Provenance linking (doc → page → region)
-- **Phase 3 — Normalization** ⬜
+- **Phase 2 — Document Intelligence** ✅
+  - ✅ Text/table extraction for native PDFs/CSV/XLSX
+  - ✅ OCR for scanned docs (Tesseract 5.x baseline, via pypdfium2 rasterization)
+  - ✅ Field identification + confidence scoring (page-level OCR confidence;
+       column-level field ID deferred to Phase 3 normalization)
+  - ✅ Provenance linking (doc → page; region/bbox-level deferred — see
+       Known Gaps)
+- **Phase 3 — Normalization** ⬜ *(next up)*
   - ⬜ Date/amount/currency normalization
   - ⬜ Merchant canonicalization
   - ⬜ Normalized transaction schema populated end-to-end
@@ -153,6 +157,10 @@ verified. 🔶 = in progress. ⬜ = not started.
 | Primary keys | `uuidv7()` (PG18-native) | `gen_random_uuid()` (v4) | Time-ordered UUIDs keep B-tree index pages sequential on high-throughput insert tables (`transactions`); v4 fragments indexes |
 | Money storage | `Numeric(14,2)` | `Float` | Binary floats can't represent decimal currency exactly; errors compound across aggregation |
 | Password policy | Length-only (≥8 chars) | Composition rules (symbol/number required) | NIST SP 800-63B: composition rules push users toward predictable patterns; length is the stronger predictor |
+| PDF text/table extraction | pdfplumber | PyMuPDF (fitz) | PyMuPDF is AGPL-3.0 (or paid Artifex commercial license); pdfplumber is MIT. Same shape of decision as Garage's AGPL rejection. pdfplumber's char/bbox-level model also fits the doc→page→region provenance requirement better, not just the safer license. Trade-off: ~10x slower on plain text, but volume isn't the constraint here |
+| Scanned-page rasterization (for OCR) | pypdfium2 | pdfplumber's own `.to_image()` (Wand/ImageMagick), pdf2image (poppler) | Both alternatives pull in Ghostscript for PDF rendering, which is *also* AGPL — same problem one level down. pypdfium2 wraps Google's PDFium (Apache-2.0/BSD-3-Clause), zero copyleft anywhere in the pipeline. OCRmyPDF made the same switch as its preferred rasterizer |
+| OCR engine | Tesseract 5.x + pytesseract | Cloud OCR (AWS Textract, Google Document AI, Azure Doc Intelligence) | Confirmed still-current free baseline (Apache 2.0). Known weakness on noisy/handwritten scans is an accepted gap for now — deferred to an eval, not decided by assumption, per the tracker's original framing |
+| CSV/XLSX parsing | pandas + openpyxl | — | No real trade-off; settled, current, no currency concerns |
 
 ---
 
@@ -170,6 +178,33 @@ verified. 🔶 = in progress. ⬜ = not started.
 - `pgvector/pgvector:pg18` and `valkey/valkey:8` and `chrislusf/seaweedfs:4.31`
   image tags — first two are `[VERIFY]`-flagged in compose comments;
   SeaweedFS tag confirmed against the real binary during Session 1
+- Region/bbox-level provenance not yet stored — `DocumentPage.tables` holds
+  extracted rows but not their coordinates on the page. Doc→page
+  provenance exists; page→region is deferred until something downstream
+  (evidence viewer, Phase 12) actually needs to highlight a specific
+  region rather than just cite a page
+- OCR quality is Tesseract's out-of-the-box accuracy — no image
+  preprocessing (deskew, denoise, binarize, contrast) before OCR. Real
+  scanned bank statements (skewed, low-contrast, phone-photographed) will
+  likely need this; deferred until real test documents show whether it's
+  actually necessary rather than guessed at up front
+- `MAX_PDF_PAGES = 300` silently truncates larger documents (flagged with
+  a `truncated_document` warning on the last processed page, but nothing
+  currently surfaces that warning to the end user in a UI — there isn't
+  one yet)
+- No malware/content scanning on uploaded files before they reach
+  pdfplumber/Pillow/pandas parsers — a hostile PDF/image/spreadsheet
+  exploiting a parser vulnerability is out of scope for now (real fix
+  belongs in Phase 11 security hardening)
+- CSV encoding fallback list (`utf-8`, `utf-8-sig`, `latin-1`) covers
+  common cases but isn't exhaustive — a CSV in an encoding outside this
+  list fails outright rather than being detected via a charset-sniffing
+  library (not added, to avoid an extra dependency for a case real bank
+  exports rarely hit)
+- Tabular extraction stores every cell as a string (`dtype=str`) — no
+  numeric/date typing happens at this layer by design (that's Phase 3's
+  job), but it does mean `DocumentPage.tables` is not directly usable for
+  arithmetic without that later step
 
 ---
 
@@ -261,6 +296,113 @@ session's conversation; summarized in §5 above.
 
 **State at end of session:** Phase 0 and Phase 1 complete and verified.
 Next up: **Phase 2 — document text/table extraction + OCR.**
+
+---
+
+### Session 2 — 2026-09-12
+
+**Scope covered:** Phase 2 (full) — document intelligence.
+
+**Research → decision (⏸ surfaced, decided by Dhruv):** PDF text/table
+extraction library. PyMuPDF is faster but AGPL-3.0 (or paid Artifex
+license); pdfplumber is MIT. Same shape as the Garage AGPL rejection in
+Phase 1 — Dhruv chose pdfplumber + pypdfium2 (for OCR rasterization,
+avoiding Ghostscript's AGPL too). Full trade-off table in Decisions Log.
+Tesseract 5.x confirmed still current or free OCR; pandas/openpyxl
+confirmed settled, no research needed.
+
+**What was built:**
+
+- `ExtractionMethod` enum (`native_text` / `ocr` / `tabular`) and new
+  `DocumentPage` model: one row per PDF page / image / spreadsheet sheet,
+  carrying `raw_text`, `char_count`, `ocr_confidence`, `tables` (JSONB —
+  list of tables → rows → cells), `warnings` (JSONB list), and a
+  `(document_id, page_number)` uniqueness constraint. This is the
+  doc→page provenance unit the spec's explainability requirement (§14)
+  calls for. `Document.page_count` added.
+- Alembic migration `0002_document_pages`.
+- `app/pipeline/extractors/` package:
+  - `pdf.py` — pdfplumber for native text + tables; per-page fallback to
+    pypdfium2 rasterization (300 DPI) + Tesseract OCR when native text is
+    under a 20-char threshold (real bank-statement footers/headers clear
+    this easily; a truly scanned page doesn't). `MAX_PDF_PAGES = 300` cap
+    with a `truncated_document` warning on the last processed page.
+  - `image.py` — standalone PNG/JPEG uploads, OCR-only.
+  - `spreadsheet.py` — pandas/openpyxl for CSV (with a
+    utf-8 → utf-8-sig → latin-1 encoding fallback chain, since real bank
+    CSV exports are frequently not UTF-8) and XLSX (one DocumentPage per
+    sheet). Everything stored as `dtype=str` deliberately — normalization
+    is Phase 3's job, not this layer's.
+  - `ocr.py` — shared Tesseract wrapper using `image_to_data` (not
+    `image_to_string`) specifically to get per-word confidence back;
+    computes a mean confidence and flags `low_ocr_confidence` below 60.
+- `tasks.py` rewired: `process_document` now downloads the real file,
+  dispatches to the right extractor by mime type, persists `DocumentPage`
+  rows, and sets `page_count` — replacing the Phase 1 stub entirely.
+- `storage.py`: added `download_file`.
+- New endpoint `GET /documents/{id}/pages` — the evidence-layer read path.
+- Dockerfile: added `tesseract-ocr` apt package (covers both `backend`
+  and `worker` services, which share this image).
+
+**Tested for real, full stack:** real Postgres (16 substitute — sandbox
+still lacks PG18; `uuidv7()` polyfilled *only* in the local test DB via a
+`gen_random_uuid()`-backed SQL function, never touching the shipped
+migration files — confirmed via `git diff` after the fact) + real running
+SeaweedFS 4.31 binary + real Celery task (eager mode) + real Tesseract
+5.3.4, through actual HTTP requests via TestClient:
+
+- Native-text PDF (built with reportlab) → `native_text`, correct content
+- Image-only PDF (real scanned-look PNG embedded with no text layer) →
+  correctly fell back to OCR, extracted the embedded text, reported a
+  real confidence score (90.1)
+- Standalone PNG and JPEG uploads → OCR'd correctly
+- UTF-8 CSV → `tabular`, correct header/rows
+- cp1252-encoded CSV (real Windows-export-style encoding, with a non-ASCII
+  merchant name) → encoding fallback chain correctly caught it and
+  recorded a `decoded_as_latin-1` warning
+- Multi-sheet XLSX → 2 `DocumentPage` rows, correct `page_count`
+- Encrypted PDF → correctly marked `failed`
+- Corrupt/non-PDF bytes → correctly marked `failed`
+- Cross-user access to `/documents/{id}/pages` → 404, not the data
+- `MAX_PDF_PAGES` truncation, verified directly against a real 3-page PDF
+  with the cap monkeypatched to 2 → stopped at 2, `truncated_document`
+  warning present on the last page
+
+**Test-methodology correction made mid-session** (same pattern as
+Session 1's async-status correction): the first full run of the
+encrypted/corrupt-file tests crashed the test harness itself, not the
+task. Eager-mode Celery testing was configured with
+`task_eager_propagates=True`, which makes `process_document`'s
+intentional re-raise (needed so a *real* broker/worker's retry and
+observability machinery sees task failures) bubble synchronously into
+the HTTP request thread — something that can never happen with a real
+broker, where `.delay()` returns immediately and the task runs in a
+separate worker process. Fixed by leaving eager-mode propagation at its
+default (off) rather than changing the task's own error handling, since
+the task's behavior was correct and the test harness's config was not
+representative of production.
+
+**Real bug found and fixed via this testing** (not assumed away): the
+encrypted-PDF test then surfaced that `document.error_message` was being
+stored as an empty string. `str(exc)` on pdfplumber's
+`PdfminerException(PDFPasswordIncorrect())` is genuinely `''` — the
+wrapped exception carries no message, only its type. Fixed by falling
+back to `repr(exc)` whenever `str(exc)` is empty, so a failed-document
+row is never left with an uninformative blank `error_message`.
+
+**Edge cases identified this session:** encrypted/password-protected
+PDFs (now `failed` with a real error, not empty); corrupted/non-PDF bytes
+uploaded with a PDF mime type; CSVs in non-UTF-8 encodings; multi-sheet
+XLSX; pages with partial text (some ruled tables still detected on
+otherwise image-only pages); adversarially large PDFs (capped, not
+processed indefinitely); zero-page/empty workbooks (raises, marked
+failed, not silently producing zero `DocumentPage` rows). Full detail in
+this session's conversation; summarized in §5 above.
+
+**State at end of session:** Phase 2 complete and verified. Next up:
+**Phase 3 — financial data normalization** (dates, amounts/currency,
+merchant canonicalization) reading from `DocumentPage.raw_text` /
+`.tables` to populate actual `Transaction` rows.
 
 ---
 
