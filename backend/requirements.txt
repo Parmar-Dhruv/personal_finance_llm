@@ -45,3 +45,15 @@ pwdlib[argon2]
 # PyJWT, not python-jose: python-jose's last release is ~3 years stale.
 # PyJWT is actively maintained and is all we need (no JWKS/multi-IdP here).
 pyjwt
+
+# --- Normalization (Phase 3) ---
+# python-dateutil, not dateparser: already a transitive dep via pandas,
+# permissively (dual Apache-2.0/BSD-3-Clause) licensed, and this project
+# only needs structured dayfirst=True parsing, not dateparser's
+# free-text/multi-language machinery (pulls in regex, pytz, tzlocal for
+# capabilities not used here). Decided 2026-09-22, alongside the strict
+# DD/MM/YYYY-only policy (see app/pipeline/normalize/dates.py).
+python-dateutil
+# rapidfuzz, not fuzzywuzzy/thefuzz: MIT vs GPL — same license-hygiene
+# call already made for PyMuPDF/Ghostscript/Garage in earlier phases.
+rapidfuzz

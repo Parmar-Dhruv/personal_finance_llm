@@ -3,8 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, text
 import redis
 
+from app.api.accounts import router as accounts_router
 from app.api.auth import router as auth_router
 from app.api.documents import router as documents_router
+from app.api.transactions import router as transactions_router
 from app.core.config import settings
 from app.core.storage import ensure_bucket_exists
 
@@ -19,7 +21,9 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(accounts_router)
 app.include_router(documents_router)
+app.include_router(transactions_router)
 
 
 @app.on_event("startup")

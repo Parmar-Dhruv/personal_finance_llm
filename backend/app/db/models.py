@@ -60,6 +60,19 @@ class TransactionType(str, enum.Enum):
     credit = "credit"
 
 
+class NormalizationStatus(str, enum.Enum):
+    pending = "pending"
+    normalizing = "normalizing"
+    normalized = "normalized"
+    failed = "failed"
+    # Extraction succeeded but normalization can't run yet — document has
+    # no account attached, or the account's currency isn't one Phase 3
+    # supports (INR/USD only). Distinct from "failed" because it's an
+    # expected, recoverable state (assign an account / fix currency and
+    # re-trigger via POST /documents/{id}/normalize), not an error.
+    skipped = "skipped"
+
+
 class ExtractionMethod(str, enum.Enum):
     # Text came straight out of the PDF's text layer.
     native_text = "native_text"
@@ -136,6 +149,35 @@ class Category(TimestampMixin, Base):
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="category")
 
 
+class MerchantAlias(TimestampMixin, Base):
+    """
+    Phase 3 merchant canonicalization. Same NULL-user_id-means-system
+    pattern as Category: system-seeded aliases (is_system=True) are
+    visible to every user, user-defined ones are private to their owner.
+
+    `pattern` is a regex, matched case-insensitively against the start
+    of the cleaned merchant text (see pipeline/normalize/merchants.py) —
+    not a plain substring, so seed data can anchor with `^` to avoid
+    over-matching (e.g. "^AMAZON" shouldn't also swallow an unrelated
+    merchant that happens to contain "amazon" mid-string).
+    """
+
+    __tablename__ = "merchant_aliases"
+    __table_args__ = (UniqueConstraint("user_id", "pattern", name="uq_merchant_alias_user_pattern"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=PK_DEFAULT
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    pattern: Mapped[str] = mapped_column(String(255), nullable=False)
+    canonical_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    user: Mapped["User | None"] = relationship()
+
+
 class Document(TimestampMixin, Base):
     __tablename__ = "documents"
 
@@ -161,6 +203,19 @@ class Document(TimestampMixin, Base):
     # Populated once Phase 2 extraction runs. NULL until then. For
     # spreadsheets this counts sheets, not physical pages.
     page_count: Mapped[int | None] = mapped_column(nullable=True)
+
+    # Phase 3 — normalization pipeline status, separate from `status`
+    # above (which only tracks extraction). A document can be
+    # `processed` (extraction done) while `normalization_status` is
+    # still `pending`/`skipped`.
+    normalization_status: Mapped[NormalizationStatus] = mapped_column(
+        Enum(NormalizationStatus, name="normalization_status"),
+        nullable=False,
+        default=NormalizationStatus.pending,
+    )
+    normalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    normalization_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transaction_count: Mapped[int | None] = mapped_column(nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="documents")
     account: Mapped["Account | None"] = relationship(back_populates="documents")

@@ -9,8 +9,8 @@ from app.core.config import settings
 from app.core.storage import build_storage_key, delete_file, generate_download_url, upload_file
 from app.db.base import get_db
 from app.db.models import Account, Document, DocumentPage, DocumentStatus, User
-from app.pipeline.tasks import process_document
-from app.schemas.document import DocumentDownloadURL, DocumentPageRead, DocumentRead
+from app.pipeline.tasks import normalize_document, process_document
+from app.schemas.document import DocumentAccountUpdate, DocumentDownloadURL, DocumentPageRead, DocumentRead
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -141,6 +141,63 @@ def list_document_pages(
         .order_by(DocumentPage.page_number)
     )
     return list(db.execute(stmt).scalars().all())
+
+
+@router.patch("/{document_id}", response_model=DocumentRead)
+def update_document_account(
+    document_id: uuid.UUID,
+    body: DocumentAccountUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Document:
+    """
+    Assigns (or reassigns) the account a document belongs to. Needed
+    because upload allows account_id=None (Phase 1), but Phase 3
+    normalization requires an account — a Transaction row's account_id
+    is NOT NULL by design (every transaction belongs to a real account).
+    Does not itself trigger re-normalization; call POST
+    /{document_id}/normalize afterward.
+    """
+    document = db.get(Document, document_id)
+    if document is None or document.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    account = db.get(Account, body.account_id)
+    if account is None or account.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+
+    document.account_id = account.id
+    db.commit()
+    db.refresh(document)
+    return document
+
+
+@router.post("/{document_id}/normalize", response_model=DocumentRead)
+def trigger_normalization(
+    document_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Document:
+    """
+    Manually (re-)triggers Phase 3 normalization — for a document whose
+    account was just assigned post-upload, or to re-run after any other
+    fix. Synchronous (not queued via Celery) so the caller gets the
+    actual up-to-date status back immediately; normalization for a
+    single document is not expensive enough to need async dispatch here,
+    unlike the OCR-heavy extraction step.
+    """
+    document = db.get(Document, document_id)
+    if document is None or document.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    if document.status != DocumentStatus.processed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Document extraction is not complete (status: {document.status.value})",
+        )
+
+    normalize_document.apply(args=[str(document.id)])
+    db.refresh(document)
+    return document
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
