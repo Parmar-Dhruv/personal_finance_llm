@@ -1,0 +1,251 @@
+# FinSight backend
+
+FastAPI + Celery + SQLAlchemy 2 + Alembic. This README is the backend
+deep-dive: how the code is layered, exactly what the Phase 4 analytics
+compute (and don't), and how to run the test suite. For the project-level
+overview see the [root README](../README.md); for decisions and history see
+[`PROGRESS_TRACKER.md`](../PROGRESS_TRACKER.md).
+
+**Status: Phases 0–4 of 13 built.** No ML or LLM code exists yet.
+
+---
+
+## Layering
+
+```
+HTTP request
+   │
+   ▼
+app/api/*          routers: parse input, authenticate, authorize (ownership → 404), delegate
+   │
+   ├──► app/schemas/*     Pydantic request/response models (money = Decimal → JSON string)
+   │
+   ├──► app/analytics/*   Phase 4 – pure SQL + Decimal functions: (Session, Scope) → dataclasses.
+   │                      No FastAPI imports, on purpose: Phase 8's agent will call these directly as tools.
+   │
+   ├──► app/pipeline/*    Phases 2–3 – Celery tasks, extractors, normalization
+   │
+   └──► app/db/*          SQLAlchemy models + session
+        app/core/*        config, security (Argon2id/JWT), S3 storage client, Celery app
+```
+
+Rules every layer follows: ownership is checked in code (`user_id` filters;
+a row that is missing *or* someone else's returns 404, never 403); money is
+`Numeric(14,2)`/`Decimal`, never float; UUIDv7 primary keys.
+
+## Folder structure
+
+```
+backend/
+├── alembic/versions/
+│   ├── 0001_initial_schema.py       users, accounts, categories, documents, transactions
+│   ├── 0002_document_pages.py       DocumentPage (provenance)
+│   ├── 0003_normalization.py        normalization status, merchant_aliases + seed
+│   └── 0004_analytics_budgets.py    budgets, category uniqueness fix, 10 system categories, indexes
+├── app/
+│   ├── main.py
+│   ├── core/            config.py security.py storage.py celery_app.py
+│   ├── db/              base.py models.py
+│   ├── schemas/         auth account document transaction category budget analytics
+│   ├── api/
+│   │   ├── auth.py accounts.py documents.py transactions.py deps.py      (Phases 0–3)
+│   │   └── categories.py budgets.py analytics.py                          (Phase 4)
+│   ├── analytics/       (Phase 4)
+│   │   ├── common.py        Scope, shared WHERE clause, money/pct helpers, month math
+│   │   ├── cashflow.py      summary() and monthly()
+│   │   ├── breakdowns.py    by_category() by_merchant() by_account()
+│   │   └── budgets.py       utilization(), category_subtree_ids()
+│   └── pipeline/        extractors/ (Phase 2)  normalize/ (Phase 3)  tasks.py
+├── tests/               real-Postgres pytest suite (see "Testing")
+├── pytest.ini  requirements.txt  requirements-dev.txt  Dockerfile  alembic.ini
+```
+
+---
+
+## Phase 4: what the analytics compute
+
+All endpoints are `GET`, read-only, per-user, and accept the same optional
+filters: `date_from`, `date_to` (both **inclusive**), `account_id`.
+Everything is computed live in SQL on every request (no caching).
+
+### Ground rules (apply to every number)
+
+1. **Per currency, never converted.** Results are lists keyed by `currency`.
+   INR and USD are never added, compared or converted. There is no FX data
+   anywhere in the system. (Decision: Dhruv, 2026-10-18.)
+2. **Direction comes from `transaction_type`.** `credit` = income, `debit` =
+   expense. `Transaction.amount` is always a positive magnitude.
+3. **Flagged duplicates are excluded** (`duplicate_of_id IS NOT NULL`). Nothing
+   sets that flag until Phase 5, so today this is a forward-compatible no-op.
+4. **Every transaction counts equally.** `confidence_score` is not used as a
+   filter or weight — a row the normalizer was unsure about (e.g. an unsigned
+   single-amount column defaulted to debit) is summed like any other.
+5. **Calendar dates, UTC.** The pipeline stores each date as midnight UTC, so
+   months are bucketed in UTC. `date_to` is made inclusive by comparing
+   `< date_to + 1 day`.
+6. **Exact arithmetic.** SQL `SUM` over `Numeric`, Python `Decimal` for
+   percentages (2 dp, half-up). Money and percentages serialize as JSON
+   strings (`"1250.50"`) so clients can't lose cents.
+
+### Endpoints
+
+| Endpoint | Returns |
+|---|---|
+| `GET /analytics/summary` | per currency: `income`, `expense`, `net`, counts, `savings_rate_pct` (net ÷ income; `null` when income is 0) |
+| `GET /analytics/monthly` | per currency: one point per calendar month — income/expense/net, count, `partial`, and change vs the previous calendar month (absolute and %) |
+| `GET /analytics/categories?type=&limit=` | per currency: totals per **directly assigned** category, plus an explicit `Uncategorized` row, `pct_of_total`, and `other_total` for rows cut by `limit` |
+| `GET /analytics/merchants?type=&limit=` | same shape, grouped by canonical merchant (`merchant_normalized`); NULL merchants pooled as `(unknown merchant)`; default `limit=10` |
+| `GET /analytics/accounts` | one row per account (and currency) with income/expense/net; idle accounts appear with zeros |
+| `GET /analytics/budget-utilization?month=YYYY-MM` | every active budget for that month: `limit`, `spent`, `remaining`, `pct_used`, `status` |
+
+`type` is `debit` (default) or `credit`.
+
+Behaviors worth knowing:
+
+- **Monthly gap-fill.** Months with no activity inside the series are returned as
+  zeros, so "previous month" always means the previous *calendar* month. The
+  series spans `date_from`..`date_to` if given, otherwise the currency's own
+  first..last month of data.
+- **`partial: true`** marks a first/last month that the requested range clips.
+  Its totals cover only part of the month — don't read its change-vs-previous as
+  a like-for-like comparison. (The *current* in-progress month is not flagged
+  unless `date_to` clips it.)
+- **% change is `null` when the previous value is 0** (undefined, not 0 and not
+  infinity). The absolute change is still given.
+- **Ties are ordered deterministically** (amount desc, then label).
+
+### Budgets
+
+A budget is `(category or overall, currency, monthly amount, alert threshold %)`.
+
+- Create/list/patch/delete via `/budgets`. `category_id: null` = overall budget.
+- At most **one budget per (user, category, currency)** — enforced in Postgres
+  with `UNIQUE NULLS NOT DISTINCT`, so that includes "one overall budget per
+  currency". Violations return 409 (also under concurrent requests).
+- **Spent** = debits only, in the budget's currency, inside the calendar month,
+  excluding flagged duplicates.
+- A **category budget includes its whole subtree** (recursive CTE): a budget on
+  `Food` counts spend on `Food › Takeaway › Pizza`. An **overall budget counts
+  everything**, including uncategorized spend — so it is *not* the sum of the
+  category budgets beside it.
+- **Status:** `over` if `spent > limit`; else `near` if `spent ≥ threshold% × limit`;
+  else `ok`. Spending exactly the limit is `near`, not `over`. The comparison uses
+  exact values, not the rounded `pct_used` (79.996% displays as `80.00` but is
+  still `ok` against an 80% threshold).
+- Inactive budgets (`is_active=false`) are listed by `GET /budgets` but skipped
+  by utilization.
+- `PATCH /budgets/{id}` can change `amount`, `alert_threshold_pct`, `is_active`.
+  Category and currency are immutable — delete and recreate.
+
+### Categories (minimal)
+
+- `POST /categories {name, parent_id?}` and `GET /categories` (system + your own).
+- Ten **system categories** are seeded by migration 0004 (the spec's list: Food,
+  Transportation, Shopping, Utilities, Entertainment, Healthcare, Travel, Rent,
+  Salary, Business expenses). Nothing assigns them automatically yet — that is Phase 5.
+- Names are unique per level case-insensitively and can't shadow a system category.
+  Nesting is capped at 3 levels (an arbitrary guard).
+- `PATCH /transactions/{id} {"category_id": <id>|null}` assigns/clears a category.
+  Omitting the field is a no-op; explicit `null` clears it. Only system or your own
+  categories are accepted.
+- No rename, move or delete (see Known gaps).
+
+---
+
+## Known gaps and limitations (Phase 4)
+
+Deliberate scope cuts and unfixed weaknesses, stated plainly. The rolled-up
+list across all phases is in `PROGRESS_TRACKER.md` §5.
+
+**Correctness caveats a user could be misled by**
+- **Transfers are counted as spending/income.** Paying a credit-card bill from
+  your checking account shows as an expense on checking *and* the purchases show
+  again on the card; moving money between your own accounts inflates both income
+  and expense. There is no transfer detection (needs Phase 5 classification).
+- **Refunds are not netted.** A refund is a credit, so it raises income and does
+  *not* reduce category spend or budget utilization. Category/merchant/budget
+  "spent" is gross debits.
+- **Only as good as Phase 3's debit/credit call.** Single-amount-column statements
+  with no sign default to `debit` (confidence 0.5); analytics sums them as real
+  expenses. Credit-card statements, where "credit" can mean a payment *or* a
+  refund, have not been validated against real-world layouts.
+- **Category breakdown is direct-only; budgets roll up.** `/analytics/categories`
+  reports the category each transaction is assigned to (no parent roll-up), while a
+  budget on a parent counts its descendants. Both are documented, but they will not
+  visually reconcile for nested categories.
+- **No "recurring expense totals"** (spec §8): that depends on Phase 5 recurring
+  detection; `is_recurring` is always false today.
+
+**Scope cuts**
+- No currency conversion; no combined "total across currencies" (decision).
+- Budgets are calendar-monthly only: no weekly/yearly/custom periods, rollover,
+  proration, or forecast-based "will you overspend" (Phase 6).
+- Budget status is computed on request. Nothing *delivers* an alert (Phase 9).
+- Categories can't be renamed, moved or deleted via the API; assignment is one
+  transaction at a time (no bulk). Deleting a category in the DB cascades to its
+  budgets and children.
+- Month bucketing is UTC, and "current month" for `budget-utilization` defaults to
+  the current UTC month, so for a user in IST the month rolls over at 05:30 local.
+
+**Operational**
+- Analytics are recomputed per request; no caching or materialized views.
+  Measured on the sandbox (Postgres 16, one user with 104k transactions among
+  204k rows): all-time summary ≈ 46 ms, one-month ≈ 5 ms, and the planner uses
+  `ix_transactions_user_date`. Not benchmarked on PG18, under concurrency, or at
+  larger scale.
+- Breakdown/merchant endpoints return all matching groups unless `limit` is given.
+
+**Inherited, not changed in Phase 4** — `GET /transactions?date_to=` still compares
+a timestamp to a date with `<=` (excludes later-in-the-day rows; harmless while
+every row is midnight UTC, wrong for any future manual entry with a time); and the
+other gaps listed in the root README.
+
+---
+
+## Running things
+
+```bash
+# whole stack
+cp ../.env.example ../.env       # then fill in secrets
+docker compose up --build        # from the repo root
+docker compose exec backend alembic upgrade head
+```
+
+Interactive API docs: <http://localhost:8000/docs>.
+
+### Testing
+
+The suite runs against **real Postgres** through the **real HTTP stack**
+(FastAPI `TestClient`), with schema built by the **real Alembic migrations**.
+No mocks. It needs:
+
+- a Postgres 15+ server with the `pgvector` extension available (15+ because
+  migration 0004 uses `NULLS NOT DISTINCT`);
+- a database whose name ends in `_test` — the suite **drops and recreates the
+  `public` schema**, and refuses to run otherwise;
+- optionally a second DB `finsight_migration_test` for the migration round-trip.
+
+```bash
+pip install -r requirements-dev.txt
+export TEST_DATABASE_URL=postgresql+psycopg://finsight:finsight_dev_password@localhost:5432/finsight_test
+pytest
+```
+
+What's covered (60 tests): exact-decimal sums (1000 × 0.10 = 100.00); currency
+separation; inclusive date boundaries, month/year/leap-day edges; gap-filled
+monthly series and partial flags; zero-denominator percentages; duplicate
+exclusion; category/merchant/account breakdowns incl. ties and `limit`; budget
+status boundaries (79.999%, exactly threshold, exactly limit, 1 cent over);
+category-subtree roll-up; per-currency budgets; cross-user isolation and 401 on
+every endpoint; input validation (NaN, 3-decimal amounts, bad months);
+concurrent duplicate category/budget creation (one 201, rest 409, no 500s);
+migration upgrade → downgrade → upgrade with the constraints checked in raw SQL;
+and a seam test where transactions come from the real Phase 3 normalizer.
+
+**Not covered:** Celery/Valkey/SeaweedFS/OCR (untouched this phase — Phases 1–3
+were verified against them earlier; they were not re-run end-to-end here),
+Postgres 18 specifically (sandbox runs 16), and anything frontend.
+
+On Postgres < 18 the harness creates a `uuidv7()` polyfill backed by
+`gen_random_uuid()` **inside the test database only** (`tests/conftest.py`).
+Shipped migrations and models always use the native `uuidv7()`.

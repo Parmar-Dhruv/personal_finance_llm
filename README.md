@@ -6,7 +6,7 @@ data normalization → (eventually) analytics, RAG, and agentic
 natural-language Q&A, with every answer traceable back to a source
 document and page.
 
-**Status: Phases 0–3 of 13 complete.** This README describes what's
+**Status: Phases 0–4 of 13 complete.** This README describes what's
 actually built and running today, not the end-state design — for the
 full 13-phase target architecture and design rationale, see
 [`personal_finance_llm.md`](./personal_finance_llm.md). For the
@@ -24,15 +24,17 @@ snapshot; that file is the source of truth.
 | 1 — Auth + document upload | ✅ | Signup/login (JWT), document upload to object storage |
 | 2 — Document intelligence | ✅ | OCR, table extraction, per-page provenance |
 | 3 — Data normalization | ✅ | Dates/amounts/currency → structured `Transaction` rows, merchant canonicalization |
-| 4 — Financial analytics | ⬜ next | Deterministic income/expense/cash-flow calculations |
-| 5–13 | ⬜ | ML classification, anomaly detection, forecasting, RAG, agentic Q&A, reporting, evaluation, deployment |
+| 4 — Deterministic analytics | ✅ | Income/expense/net cash flow, monthly trends, category/merchant/account summaries, monthly budgets + utilization — all SQL/`Decimal`, per currency |
+| 5 — ML layer | ⬜ next | Transaction classification, duplicate / recurring / anomaly detection |
+| 6–13 | ⬜ | Forecasting, RAG, agentic Q&A, product features, evaluation, security hardening, frontend, deployment |
 
 A document today flows: **upload → object storage → OCR/table
 extraction (Celery) → date/amount/merchant normalization (Celery,
-auto-chained) → queryable `Transaction` rows via API.** Nothing past
-that point exists yet — no categorization, no analytics, no LLM calls
-anywhere in the pipeline (by design; see `personal_finance_llm.md` §17
-on the deterministic/ML/LLM separation principle).
+auto-chained) → queryable `Transaction` rows → deterministic analytics and
+budget utilization via API.** There is no automatic categorization (Phase 5),
+no forecasting, and no LLM calls anywhere (by design; see
+`personal_finance_llm.md` §17 on the deterministic/ML/LLM separation
+principle). Categories can currently only be assigned by hand.
 
 ---
 
@@ -44,8 +46,12 @@ Frontend (Next.js)
       ▼
 Backend API (FastAPI)
       │
+      ├──► Analytics layer (app/analytics — plain SQL + Decimal, no HTTP knowledge)
+      │       cash flow · monthly trends · category/merchant/account breakdowns ·
+      │       budget utilization
+      │
       ├──► Postgres 18 + pgvector  (users, accounts, documents, document_pages,
-      │                             transactions, merchant_aliases, categories)
+      │                             transactions, merchant_aliases, categories, budgets)
       ├──► SeaweedFS (S3-compatible object storage — original documents)
       └──► Valkey  ──► Celery workers
                           │
@@ -54,6 +60,13 @@ Backend API (FastAPI)
                                                      → Transaction rows)
                              auto-chained after process_document succeeds
 ```
+
+Analytics read the `Transaction` table directly and never write to it.
+They are **per-currency** (INR and USD totals are never combined or
+converted) and live in a layer with no FastAPI imports, so Phase 8's agent
+can call the same functions as tools. Exact definitions of every number —
+what counts as income, spent, "near budget" — are in
+[`backend/README.md`](./backend/README.md).
 
 Every document keeps its original file in object storage as the source
 of truth. Extraction writes per-page `DocumentPage` rows (raw text,
@@ -66,7 +79,7 @@ phase is meant to build on.
 **Core design principle carried through every phase:** deterministic
 code for what must be correct (parsing, arithmetic), ML for what must
 be predicted (later phases), LLMs for what needs flexible language
-understanding (later phases). Phases 0–3 contain zero LLM calls.
+understanding (later phases). Phases 0–4 contain zero LLM calls.
 
 ---
 
@@ -81,13 +94,18 @@ personal_finance_llm/
 ├── .env.example
 │
 ├── backend/
+│   ├── README.md                          # backend deep-dive: analytics definitions, testing, Phase 4 gaps
 │   ├── Dockerfile
 │   ├── requirements.txt
+│   ├── requirements-dev.txt               # pytest + httpx
+│   ├── pytest.ini
+│   ├── tests/                             # 60 real-Postgres tests (analytics, budgets, categories, migrations, pipeline seam)
 │   ├── alembic/
 │   │   └── versions/
 │   │       ├── 0001_initial_schema.py     # users, accounts, categories, documents, transactions
 │   │       ├── 0002_document_pages.py     # DocumentPage + provenance fields (Phase 2)
-│   │       └── 0003_normalization.py      # normalization_status fields, merchant_aliases + seed data (Phase 3)
+│   │       ├── 0003_normalization.py      # normalization_status fields, merchant_aliases + seed data (Phase 3)
+│   │       └── 0004_analytics_budgets.py  # budgets, category uniqueness fix, 10 system categories (Phase 4)
 │   └── app/
 │       ├── main.py                        # FastAPI app, router registration, /health
 │       ├── core/
@@ -102,13 +120,24 @@ personal_finance_llm/
 │       │   ├── auth.py
 │       │   ├── account.py
 │       │   ├── document.py
-│       │   └── transaction.py
+│       │   ├── transaction.py
+│       │   ├── category.py                # Phase 4
+│       │   ├── budget.py                  # Phase 4
+│       │   └── analytics.py               # Phase 4
 │       ├── api/                           # FastAPI routers
 │       │   ├── auth.py                    # /auth/signup, /auth/login, /auth/me
 │       │   ├── accounts.py                # /accounts (create, list)
 │       │   ├── documents.py               # /documents (upload, list, get, patch, delete, pages, normalize)
-│       │   ├── transactions.py            # /transactions (list, get)
-│       │   └── deps.py                    # get_current_user, get_db
+│       │   ├── transactions.py            # /transactions (list, get, patch category)
+│       │   ├── categories.py              # /categories (create, list) — Phase 4
+│       │   ├── budgets.py                 # /budgets (CRUD) — Phase 4
+│       │   ├── analytics.py               # /analytics/* (read-only) — Phase 4
+│       │   └── deps.py                    # get_current_user, get_db, ownership helpers
+│       ├── analytics/                     # Phase 4 — deterministic analytics (no FastAPI imports)
+│       │   ├── common.py                  # Scope, shared filters, money/percent/month helpers
+│       │   ├── cashflow.py                # summary(), monthly()
+│       │   ├── breakdowns.py              # by_category(), by_merchant(), by_account()
+│       │   └── budgets.py                 # utilization(), category subtree roll-up
 │       └── pipeline/
 │           ├── tasks.py                   # Celery tasks: process_document, normalize_document
 │           ├── extractors/                # Phase 2 — document intelligence
@@ -131,7 +160,7 @@ personal_finance_llm/
 
 ---
 
-## Data model (as of Phase 3)
+## Data model (as of Phase 4)
 
 - **User** — auth identity
 - **Account** — a bank/card account a user owns; `currency` (ISO code),
@@ -150,8 +179,13 @@ personal_finance_llm/
   method, merchant match tier, etc., for audit)
 - **MerchantAlias** — `pattern` (regex) → `canonical_name`, system-seeded
   (`is_system=True`, `user_id=NULL`) or user-defined
-- **Category** — exists in the schema (Phase 1), not yet populated by
-  anything — classification is Phase 5
+- **Category** — system categories (`user_id NULL`; ten seeded by
+  migration 0004, from the spec) plus user-created ones, up to 3 levels
+  deep. `Transaction.category_id` is set manually via the API today;
+  Phase 5's classifier will write the same column
+- **Budget** (Phase 4) — a monthly limit for one `(category | overall,
+  currency)`: `amount`, `alert_threshold_pct`, `is_active`. At most one
+  per `(user, category, currency)`, enforced by the database
 
 ---
 
@@ -176,11 +210,28 @@ POST   /documents/{id}/normalize       manually (re-)trigger Phase 3 normalizati
 
 GET    /transactions                   ?account_id&date_from&date_to&limit&offset
 GET    /transactions/{id}
+PATCH  /transactions/{id}              {category_id | null}  — assign / clear category
+
+POST   /categories                     {name, parent_id?}
+GET    /categories                     system + your own
+
+POST   /budgets                        {category_id?, currency, amount, alert_threshold_pct?}
+GET    /budgets
+PATCH  /budgets/{id}                   {amount?, alert_threshold_pct?, is_active?}
+DELETE /budgets/{id}
+
+# all analytics: read-only, per currency, filters ?date_from&date_to&account_id (dates inclusive)
+GET    /analytics/summary              income / expense / net / savings rate
+GET    /analytics/monthly              month-by-month series + change vs previous month
+GET    /analytics/categories           ?type=debit|credit&limit
+GET    /analytics/merchants            ?type=debit|credit&limit=10
+GET    /analytics/accounts             per-account summary (idle accounts included)
+GET    /analytics/budget-utilization   ?month=YYYY-MM  → limit/spent/remaining/pct/status per budget
 
 GET    /health                         real Postgres + Valkey connectivity check
 ```
 
-All document/account/transaction endpoints enforce per-user isolation
+All document/account/transaction/category/budget/analytics endpoints enforce per-user isolation
 (404, not 403, on someone else's resource — no existence leak).
 
 ---
@@ -199,6 +250,8 @@ docker compose exec backend alembic upgrade head
 - Backend: http://localhost:8000 (docs at `/docs`)
 - Health check: http://localhost:8000/health
 
+Money in API responses is a JSON **string** (`"1250.50"`), never a float.
+
 A typical end-to-end flow once running:
 
 ```
@@ -208,6 +261,11 @@ POST /documents/upload?account_id=<id>             # upload a statement
                                                      # → extraction runs, then normalization
                                                      #   auto-chains right after it
 GET  /transactions?account_id=<id>                  # see the normalized result
+GET  /analytics/summary                             # income / expense / net per currency
+GET  /analytics/monthly                             # month-by-month trend
+PATCH /transactions/{id} {"category_id": ...}       # categorize by hand (Phase 5 will automate)
+POST /budgets {"currency":"INR","amount":"10000"}   # overall monthly budget
+GET  /analytics/budget-utilization?month=2026-08
 ```
 
 If a document is uploaded without `account_id`, normalization is
@@ -231,8 +289,12 @@ Known Gaps; the load-bearing ones:
   but the amount parser also hardcodes the shared comma-thousands/
   dot-decimal convention both currencies use, so adding a comma-decimal
   currency (EUR-style) needs real parser rework, not a config flag.
-- No transaction categorization yet (`Category` is unused) — that's
-  Phase 5.
+- **Analytics never convert currency** (Phase 4 decision): every total is
+  per currency, and there's no "everything combined" number for a user
+  holding both INR and USD accounts.
+- Budgets are calendar-monthly only (no weekly/yearly/rollover/forecast).
+- No automatic transaction categorization — Phase 5. Until then category
+  summaries are mostly "Uncategorized" unless you assign categories by hand.
 
 **Heuristic limitations (real, not yet hardened):**
 - A single "Amount" column with no sign, no Cr/Dr suffix, and no
@@ -248,6 +310,20 @@ Known Gaps; the load-bearing ones:
 - `confidence_score` is a hand-weighted heuristic (column-detection
   source, date-parse method, amount-sign certainty, merchant-match tier,
   OCR quality) — not calibrated against any labeled dataset.
+
+**Phase 4 analytics caveats** (full list with reasoning in
+[`backend/README.md`](./backend/README.md)):
+- **Transfers count as income/expense.** Credit-card bill payments and moves
+  between your own accounts are not detected, so they inflate both sides.
+- **Refunds aren't netted** against category spend or budgets.
+- Analytics trust Phase 3's debit/credit call and ignore `confidence_score` —
+  a low-confidence row is summed like any other.
+- Category breakdown is direct-assignment only; budgets roll up descendants.
+- No "recurring expense totals" yet — depends on Phase 5 recurring detection.
+- Computed live per request, no caching. Measured ≈46 ms all-time summary for
+  one user with 104k rows on Postgres 16 in the dev sandbox; not benchmarked
+  on PG18 or under concurrent load.
+- Categories can't be renamed/moved/deleted via the API.
 
 **Infrastructure / pre-existing:**
 - Object storage (SeaweedFS) still has no encryption-at-rest configured.
@@ -269,9 +345,14 @@ Known Gaps; the load-bearing ones:
 
 Every phase is tested against real infrastructure — real Postgres, real
 SeaweedFS, a real Celery worker on a real broker, real HTTP requests —
-never mocks. Where the sandbox used for development lacks a service
+never mocks. From Phase 4 on, the Postgres-backed tests are a committed
+pytest suite (`backend/tests/`, 60 tests; run instructions in
+`backend/README.md`) rather than throwaway scripts; earlier phases'
+SeaweedFS / Celery / OCR checks were run ad hoc and are *not* part of that
+suite. Where the sandbox used for development lacks a service
 (e.g. Postgres 18 or Docker itself), a close real substitute is used
-(Postgres 16, `uuidv7()` polyfilled locally) and explicitly never
+(Postgres 16, `uuidv7()` polyfilled locally — in the suite, only inside
+`tests/conftest.py` against a `*_test` database) and explicitly never
 touches shipped migration files — verified via `git diff` before every
 delivery. Full test narrative per phase, including two real bugs caught
 this way (an empty-`str(exception)` edge case in Phase 2, a
@@ -282,8 +363,10 @@ in `PROGRESS_TRACKER.md`.
 
 ## Next up
 
-**Phase 4 — deterministic financial analytics**: income/expense/net
-cash-flow calculations, category and vendor spending summaries, monthly
-comparisons, budget utilization — all as deterministic SQL/Python over
-the now-populated `Transaction` table, no ML or LLM involved (that
-separation is the point — see `personal_finance_llm.md` §8 and §17).
+**Phase 5 — ML layer**: transaction classification (rule-based baseline →
+classical ML → LLM/hybrid, compared on accuracy/cost/latency), duplicate
+detection (writes `Transaction.duplicate_of_id`, which analytics already
+exclude), recurring-payment detection (unlocks the missing "recurring
+totals"), and anomaly detection. It needs labeled data to evaluate
+against, which the project doesn't have yet — expect that to be the first
+real decision of the phase.

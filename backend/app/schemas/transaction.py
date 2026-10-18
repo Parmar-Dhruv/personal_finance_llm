@@ -24,3 +24,10 @@ class TransactionRead(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class TransactionUpdate(BaseModel):
+    # The only user-editable transaction field so far. Explicit null
+    # un-categorizes; omitting the key is a no-op (checked via
+    # model_fields_set in the endpoint, since both look like None here).
+    category_id: uuid.UUID | None = None

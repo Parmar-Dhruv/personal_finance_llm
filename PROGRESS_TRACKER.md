@@ -33,12 +33,15 @@ finsight/
       main.py
       core/ (config.py, security.py, storage.py, celery_app.py)
       db/ (base.py, models.py)
-      schemas/ (auth.py, document.py, account.py, transaction.py)
-      api/ (auth.py, documents.py, accounts.py, transactions.py, deps.py)
+      schemas/ (auth.py, document.py, account.py, transaction.py, category.py, budget.py, analytics.py)
+      api/ (auth.py, documents.py, accounts.py, transactions.py, categories.py, budgets.py, analytics.py, deps.py)
+      analytics/ (common.py, cashflow.py, breakdowns.py, budgets.py)   # Phase 4, no FastAPI imports
       pipeline/
         tasks.py
         extractors/ (common.py, ocr.py, pdf.py, image.py, spreadsheet.py)
         normalize/ (dates.py, amounts.py, merchants.py, columns.py, engine.py)
+    tests/ (conftest.py + 7 test modules, 60 tests, real Postgres)      # Phase 4
+    README.md, pytest.ini, requirements-dev.txt
   frontend/
     package.json, tsconfig.json, next.config.mjs, Dockerfile
     app/ (layout.tsx, page.tsx)
@@ -110,10 +113,12 @@ verified. 🔶 = in progress. ⬜ = not started.
   - ✅ Normalized transaction schema populated end-to-end (DB → Celery
        chain → API, verified via real Postgres + real Redis/Celery worker
        + real HTTP requests)
-- **Phase 4 — Deterministic Analytics** ⬜
-  - ⬜ Income/expense/cash-flow calculations
-  - ⬜ Category/vendor/account summaries
-  - ⬜ Budget utilization math
+- **Phase 4 — Deterministic Analytics** ✅
+  - ✅ Income/expense/cash-flow calculations (per currency, summary + monthly with MoM)
+  - ✅ Category/vendor/account summaries
+  - ✅ Budget utilization math (monthly budgets, category-subtree roll-up)
+  - ✅ Minimal categories API + manual category assignment (gap patch, see Session 4)
+  - ⬜ "Recurring expense totals" (spec §8) — deferred: needs Phase 5 recurring detection
 - **Phase 5 — ML Layer** ⬜
   - ⬜ Transaction classification (rule-based baseline → ML/LLM comparison)
   - ⬜ Duplicate detection (uses `Transaction.duplicate_of_id`, already in schema)
@@ -168,6 +173,15 @@ verified. 🔶 = in progress. ⬜ = not started.
 | Date parsing library | `python-dateutil` (`dayfirst=True`, explicit `strptime` formats tried first) | `dateparser` | `dateparser` has a cleaner ambiguity API and more recent release cadence, but pulls in `regex`/`pytz`/`tzlocal` for free-text/multi-language parsing this project doesn't need (statement dates are structured, not conversational). `python-dateutil` is already a transitive dep via pandas, permissively licensed, stable |
 | Currency scope | INR + USD only | Locale-aware multi-currency (Babel) | Dhruv's explicit call. Both share the same decimal-point/comma-grouping convention, so one parser handles both without per-currency branching; a EUR-style comma-decimal currency needs real rework, not just a config flag (see Known Gaps) |
 | Merchant fuzzy-matching | `rapidfuzz` | `fuzzywuzzy` / `thefuzz` | MIT vs GPL — same license-hygiene call already made for PyMuPDF/Garage. Confirmed still actively maintained (v3.14.x) |
+| Multi-currency analytics (Phase 4) | Per-currency results, never convert | Convert to a base currency via an `fx_rates` table / external API | Dhruv's call (recommended option). No FX data source, no historical-rate-date semantics, no "missing rate" failure mode in a phase meant to be purely deterministic. Cost: no single combined total for a user with both INR and USD accounts |
+| Category plumbing (Phase 4) | Minimal `POST/GET /categories` + `PATCH /transactions/{id}` category assignment | Analytics-only, categories insertable only via DB | Dhruv's call (recommended). Same minimal-patch precedent as the Phase 3 Accounts gap; makes category summaries/budgets testable end-to-end through the API. Phase 5 classifier will write the same `category_id` column |
+| Budget scope (Phase 4) | Monthly only; per-category (subtree) or overall; currency on the budget | Flexible weekly/monthly/yearly periods | Dhruv's call (recommended). Spec only shows monthly examples; flexible periods add week-start/partial-period edge cases for no current need |
+| Uniqueness with NULL columns | `UNIQUE ... NULLS NOT DISTINCT` (PG15+) for budgets and for categories (`user_id, parent_id, lower(name)`) | Plain `UNIQUE` (NULLs distinct) / application-only checks | Plain UNIQUE silently never constrained system or top-level categories (Phase 1 caveat) and would allow unlimited "overall" budgets. NULLS NOT DISTINCT is DB-enforced and race-free (verified with concurrent requests). Raises the Postgres floor to 15 — already below the PG18 target |
+| Budget → category FK on delete | `ON DELETE CASCADE` | `SET NULL` | SET NULL would silently turn a deleted category's budget into an *overall* budget |
+| "Spent" definition for budgets | Gross debits in the budget's currency in the calendar month, excluding flagged duplicates; refunds not netted | Net of refunds | Simplest unambiguous definition; refunds need Phase 5 context to attribute to the right category. Logged as a gap |
+| Month bucketing | UTC calendar months | User-timezone months | Phase 3 stores dates as midnight-UTC calendar dates, so UTC is exactly right for stored data; a user timezone would only matter for the "current month" default |
+| Money in API JSON | `Decimal` → string | float | Same reasoning as `Numeric` storage; clients can't lose cents |
+| Test tooling | `pytest` + `httpx` (dev-only `requirements-dev.txt`), suite committed in `backend/tests/` | Continue with throwaway scripts | Phase 4 is the first phase with enough logic to need a regression suite. Not a trade-off needing Dhruv's input; pytest 9.x confirmed current (already installed at 9.1.1 in the sandbox venv; the web search for it returned only stale docs, so currency rests on that, not on a source) |
 
 ---
 
@@ -261,6 +275,44 @@ verified. 🔶 = in progress. ⬜ = not started.
   queued — fine at current single-document scale, inconsistent with
   `process_document`'s async dispatch pattern if this ever needs to
   handle a bulk re-normalize operation
+
+---
+
+### Added in Phase 4
+
+- **Transfers are counted as income/expense** — credit-card bill payments and
+  own-account transfers aren't detected, so they inflate both income and
+  expense (and double-count card purchases). Needs Phase 5 classification
+- **Refunds are not netted** against category/merchant spend or budget
+  utilization (a refund is a credit → counted as income only)
+- Analytics ignore `confidence_score`: low-confidence rows (e.g. unsigned
+  single-amount defaulted to `debit`) are summed like any other
+- Credit-card statement debit/credit semantics not validated against real-world
+  layouts (Phase 3 behavior, now feeding numbers users will read)
+- `/analytics/categories` reports directly-assigned categories only, while
+  budgets roll up descendants — documented, but nested categories won't
+  visually reconcile between the two
+- No "recurring expense totals" (spec §8); `is_recurring` is always false until Phase 5
+- Budgets: monthly only; no weekly/yearly/rollover/proration; status is computed
+  on request, nothing delivers an alert (Phase 9); no forecast-based projection (Phase 6)
+- Categories API is create + list only: no rename/move/delete, no bulk assignment;
+  max nesting depth 3 is an arbitrary guard. A category deleted directly in the DB
+  cascades to its children and budgets
+- Budget category/currency are immutable (delete + recreate to change)
+- Month rollover and the `budget-utilization` default month are UTC (IST users see
+  rollover at 05:30 local)
+- No caching/materialized views. Sandbox measurement only: one user with 104k rows
+  among 204k, all-time summary ≈46 ms, one month ≈5 ms, planner uses
+  `ix_transactions_user_date`; Postgres 16, no concurrency, not PG18
+- `GET /transactions?date_to=` (Phase 3) still compares timestamp `<=` date, excluding
+  later-in-the-day rows — harmless for midnight-UTC rows, wrong for future manual
+  entries. Not fixed (out of Phase 4 scope); analytics use a half-open upper bound
+- `MerchantAlias(user_id, pattern)` still has the NULL-distinct uniqueness caveat
+  (Category's was fixed in 0004; MerchantAlias was left alone as out of scope)
+- Phase 4 tests ran on Postgres 16 with a test-DB-only `uuidv7()` polyfill; the
+  Celery/Valkey/SeaweedFS/OCR chain was not re-run end-to-end this session
+  (normalization engine was exercised in-process, not via a worker)
+- FastAPI `@app.on_event("startup")` deprecation warning (pre-existing, untouched)
 
 ---
 
@@ -585,6 +637,77 @@ in this session's conversation; summarized in §5 above.
 **Phase 4 — deterministic financial analytics** (income/expense/
 cash-flow calculations, category/vendor/account summaries, budget
 utilization math) over the now-populated `Transaction` table.
+
+---
+
+### Session 4 — 2026-10-18
+
+**Scope covered:** Phase 4 (full) — deterministic analytics.
+
+**Research → decisions (⏸ surfaced, decided by Dhruv, all three took the
+recommended option):** (1) mixed-currency handling → per-currency, no
+conversion; (2) categories were empty with no API → minimal category API +
+manual assignment; (3) budget scope → monthly only, per-category + overall.
+No new runtime library was needed (SQL + `Decimal`). `pytest` added as a
+dev dependency — its currency was **not** verified from a source (search
+returned only stale pages); it's installed at 9.1.1 in the sandbox venv.
+Honest note: this thin on "search first" for the one new dependency.
+
+**What was built:**
+
+- Migration `0004_analytics_budgets`: `budgets` table (amount > 0 and 0 < threshold ≤ 100
+  CHECKs; `UNIQUE NULLS NOT DISTINCT (user_id, category_id, currency)`); replaced the
+  Phase 1 category UNIQUE with `UNIQUE (user_id, parent_id, lower(name)) NULLS NOT
+  DISTINCT` (fixes the NULL-distinct hole and makes names case-insensitive); seeded the
+  spec's 10 system categories; indexes `ix_transactions_user_category`, `ix_categories_parent_id`.
+- `app/analytics/` (no FastAPI imports so Phase 8 can wrap it as tools): `Scope` +
+  shared filter (user, duplicates excluded, inclusive dates via half-open bound),
+  `summary`, `monthly` (gap-filled, MoM absolute/%, `partial` flag), `by_category`,
+  `by_merchant`, `by_account`, `budgets.utilization` (recursive-CTE subtree roll-up).
+- API: `/analytics/{summary,monthly,categories,merchants,accounts,budget-utilization}`,
+  `/budgets` CRUD, `/categories` create/list, `PATCH /transactions/{id}` (assign/clear category).
+- Docs: root README rewritten for Phase 4 and a new `backend/README.md` (layering, exact
+  analytics definitions, Phase 4 gaps, how to run the suite).
+
+**Tested for real:** committed pytest suite, **60 tests, all passing**, against real
+Postgres 16 + real Alembic migrations + real HTTP (TestClient), no mocks. Covers: exact
+decimals (1000×0.10 = 100.00); currency separation; inclusive date edges; month/year/
+leap-day boundaries; gap-fill, `partial`, zero-denominator %; duplicate exclusion;
+breakdowns incl. ties/limit/`Uncategorized`; budget status boundaries (79.999%, exactly
+threshold, exactly limit, +1 cent); subtree roll-up; per-currency budgets; cross-user
+isolation + 401 on every endpoint; validation (NaN/Infinity, 3-dp amounts, bad months,
+inverted ranges); concurrent duplicate category/budget creation (exactly one 201, rest 409);
+migration base→head→0003→head with constraints exercised in raw SQL; and a Phase 3→4 seam
+test using transactions produced by the real normalization engine (incl. re-normalize
+idempotency). Scale check: 204k rows / 104k for one user — see Known Gaps for numbers.
+
+**Test-premise/expectation errors found and corrected (not retrofitted):**
+1. A float-drift sanity check failed because Python ≥3.12 `sum()` uses compensated
+   summation and does *not* drift; the premise was wrong, so the check now uses naive
+   accumulation (and a comment records the trap).
+2. The seam test assumed `normalize_document` commits. It doesn't (the Celery task
+   owns the commit) — the function's docstring wrongly said it did. Fixed the
+   **docstring**, not behavior; the test now commits like the task does.
+3. One expected total in my own test was arithmetic I got wrong (2400.50 vs 2400.00);
+   the code was right.
+No production bug was found in Phase 4 code by the suite.
+
+**Sandbox substitutions & revert check:** PG16 instead of PG18; `uuidv7()` polyfill
+exists only in `tests/conftest.py` and only against `*_test` DBs (the harness refuses
+other names). Verified: `git diff` on migrations 0001–0003 is empty, 0004 and models use
+native `uuidv7()`, and `grep gen_random_uuid` outside `tests/` finds only a pre-existing comment.
+
+**Edge cases identified:** mixed currencies; transfers/card payments double-counting;
+refunds; zero/negative/NaN/over-precision amounts; 79.996% rounding vs threshold;
+spend exactly at limit; spend at month boundaries and leap day; partial first/last
+months; empty months and zero-denominator % change; duplicate-flagged rows; shadowing
+system categories; category cycles (impossible via API; CTE uses UNION as a backstop);
+concurrent duplicate creation; budget outliving its category; `NULL` merchants; user in
+IST seeing UTC month rollover. Details in `backend/README.md`.
+
+**State at end of session:** Phase 4 complete and verified. Next up: **Phase 5 — ML
+layer** (classification → duplicates → recurring → anomalies). Expect the first real
+decision to be where labeled data comes from.
 
 ---
 

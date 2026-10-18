@@ -4,7 +4,10 @@ from sqlalchemy import create_engine, text
 import redis
 
 from app.api.accounts import router as accounts_router
+from app.api.analytics import router as analytics_router
 from app.api.auth import router as auth_router
+from app.api.budgets import router as budgets_router
+from app.api.categories import router as categories_router
 from app.api.documents import router as documents_router
 from app.api.transactions import router as transactions_router
 from app.core.config import settings
@@ -24,6 +27,9 @@ app.include_router(auth_router)
 app.include_router(accounts_router)
 app.include_router(documents_router)
 app.include_router(transactions_router)
+app.include_router(categories_router)
+app.include_router(budgets_router)
+app.include_router(analytics_router)
 
 
 @app.on_event("startup")

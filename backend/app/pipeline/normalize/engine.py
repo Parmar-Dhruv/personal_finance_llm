@@ -279,7 +279,8 @@ def _normalize_raw_text(
 
 def normalize_document(db: Session, document: Document) -> int:
     """
-    Runs normalization for one document and commits. Idempotent: any
+    Runs normalization for one document. Does NOT commit — the caller (the
+    Celery task) owns the transaction. Idempotent: any
     Transaction rows previously produced from this document are deleted
     first, so re-running (e.g. after fixing the account assignment)
     doesn't duplicate rows.

@@ -5,10 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_visible_category
 from app.db.base import get_db
 from app.db.models import Transaction, User
-from app.schemas.transaction import TransactionRead
+from app.schemas.transaction import TransactionRead, TransactionUpdate
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
@@ -43,4 +43,24 @@ def get_transaction(
     txn = db.get(Transaction, transaction_id)
     if txn is None or txn.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+    return txn
+
+
+@router.patch("/{transaction_id}", response_model=TransactionRead)
+def update_transaction(
+    transaction_id: uuid.UUID,
+    payload: TransactionUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Transaction:
+    """Assign (or, with category_id: null, clear) a transaction's category."""
+    txn = db.get(Transaction, transaction_id)
+    if txn is None or txn.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+    if "category_id" in payload.model_fields_set:
+        if payload.category_id is not None:
+            get_visible_category(db, current_user, payload.category_id)
+        txn.category_id = payload.category_id
+        db.commit()
+        db.refresh(txn)
     return txn

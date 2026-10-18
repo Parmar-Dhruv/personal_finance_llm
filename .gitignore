@@ -23,3 +23,6 @@ Thumbs.db
 # Local-only data dirs (docker volumes handle this normally, but just in case)
 seaweedfs-data/
 pgdata/
+
+# Test artifacts
+.pytest_cache/

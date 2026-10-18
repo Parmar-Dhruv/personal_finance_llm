@@ -5,9 +5,11 @@ from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Numeric,
     String,
     Text,
@@ -128,7 +130,21 @@ class Account(TimestampMixin, Base):
 
 class Category(TimestampMixin, Base):
     __tablename__ = "categories"
-    __table_args__ = (UniqueConstraint("user_id", "name", "parent_id", name="uq_category_user_name_parent"),)
+    # Phase 4: replaces the Phase 1 UNIQUE(user_id, name, parent_id), which
+    # never actually constrained anything for system rows or top-level
+    # categories (Postgres treats NULLs as distinct in a plain UNIQUE).
+    # NULLS NOT DISTINCT (PG15+) closes that hole, and lower(name) makes
+    # "Food" and "food" the same category.
+    __table_args__ = (
+        Index(
+            "uq_category_scope_name",
+            "user_id",
+            "parent_id",
+            func.lower(text("name")),
+            unique=True,
+            postgresql_nulls_not_distinct=True,
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=PK_DEFAULT
@@ -138,7 +154,7 @@ class Category(TimestampMixin, Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
     )
     parent_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("categories.id", ondelete="CASCADE"), nullable=True
+        UUID(as_uuid=True), ForeignKey("categories.id", ondelete="CASCADE"), nullable=True, index=True
     )
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -147,6 +163,60 @@ class Category(TimestampMixin, Base):
     parent: Mapped["Category | None"] = relationship(remote_side=[id], back_populates="children")
     children: Mapped[list["Category"]] = relationship(back_populates="parent")
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="category")
+
+
+class Budget(TimestampMixin, Base):
+    """
+    Phase 4 monthly budget. One row = one spending limit for one currency,
+    scoped either to a category subtree or (category_id NULL) to all of the
+    user's spending in that currency.
+
+    Currency is part of the budget on purpose: analytics never converts
+    between currencies (see Decisions Log, Phase 4), so a limit of "10000"
+    is meaningless without saying which currency it's 10000 of.
+    """
+
+    __tablename__ = "budgets"
+    __table_args__ = (
+        # NULLS NOT DISTINCT so there can only be ONE overall budget per
+        # (user, currency) — a plain UNIQUE would allow unlimited NULL-category
+        # duplicates, the same trap Category/MerchantAlias fell into earlier.
+        UniqueConstraint(
+            "user_id",
+            "category_id",
+            "currency",
+            name="uq_budget_user_category_currency",
+            postgresql_nulls_not_distinct=True,
+        ),
+        CheckConstraint("amount > 0", name="ck_budget_amount_positive"),
+        CheckConstraint(
+            "alert_threshold_pct > 0 AND alert_threshold_pct <= 100",
+            name="ck_budget_threshold_range",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=PK_DEFAULT
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # NULL = overall budget. CASCADE (not SET NULL) on purpose: if a
+    # category disappears, silently turning its budget into an "overall"
+    # budget would be a nasty surprise.
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("categories.id", ondelete="CASCADE"), nullable=True
+    )
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    # Percent of the limit at which utilization flips from "ok" to "near".
+    alert_threshold_pct: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), nullable=False, default=Decimal("80.00"), server_default="80.00"
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    user: Mapped["User"] = relationship()
+    category: Mapped["Category | None"] = relationship()
 
 
 class MerchantAlias(TimestampMixin, Base):
@@ -271,6 +341,7 @@ class DocumentPage(TimestampMixin, Base):
 
 class Transaction(TimestampMixin, Base):
     __tablename__ = "transactions"
+    __table_args__ = (Index("ix_transactions_user_category", "user_id", "category_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=PK_DEFAULT
