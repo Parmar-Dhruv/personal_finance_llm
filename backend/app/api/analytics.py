@@ -10,11 +10,12 @@ from datetime import date, datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.analytics import breakdowns, budgets, cashflow
+from app.analytics import breakdowns, budgets, cashflow, recurring
 from app.analytics.common import Scope, month_end, month_start
 from app.api.deps import get_current_user, get_owned_account
 from app.db.base import get_db
 from app.db.models import TransactionType, User
+from app.schemas.ml import RecurringTotalRead
 from app.schemas.analytics import (
     AccountSummaryRead,
     BreakdownRead,
@@ -98,3 +99,17 @@ def get_budget_utilization(
         period_end=month_end(period),
         budgets=budgets.utilization(db, current_user.id, period),
     )
+
+
+@router.get("/recurring", response_model=list[RecurringTotalRead])
+def get_recurring_totals(
+    active_only: bool = True,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Monthly-equivalent recurring expense/income per currency, from detected
+    recurring series (run POST /ml/run first). Not date-scoped: recurring
+    streams are a property of the whole history.
+    """
+    return recurring.recurring_totals(db, current_user.id, active_only=active_only)

@@ -6,7 +6,7 @@ compute (and don't), and how to run the test suite. For the project-level
 overview see the [root README](../README.md); for decisions and history see
 [`PROGRESS_TRACKER.md`](../PROGRESS_TRACKER.md).
 
-**Status: Phases 0–4 of 13 built.** No ML or LLM code exists yet.
+**Status: Phases 0–5 of 13 built.** Classical ML (scikit-learn) and statistical detectors exist; no LLM call runs anywhere (an unverified, off-by-default interface exists).
 
 ---
 
@@ -23,7 +23,10 @@ app/api/*          routers: parse input, authenticate, authorize (ownership → 
    ├──► app/analytics/*   Phase 4 – pure SQL + Decimal functions: (Session, Scope) → dataclasses.
    │                      No FastAPI imports, on purpose: Phase 8's agent will call these directly as tools.
    │
-   ├──► app/pipeline/*    Phases 2–3 – Celery tasks, extractors, normalization
+   ├──► app/ml/*          Phase 5 – classifier, duplicate/recurring/anomaly detectors. Pure Python/sklearn;
+   │                      only ml/service.py touches the DB (per-user advisory lock, never commits).
+   │
+   ├──► app/pipeline/*    Phases 2–5 – Celery tasks, extractors, normalization
    │
    └──► app/db/*          SQLAlchemy models + session
         app/core/*        config, security (Argon2id/JWT), S3 storage client, Celery app
@@ -41,7 +44,8 @@ backend/
 │   ├── 0001_initial_schema.py       users, accounts, categories, documents, transactions
 │   ├── 0002_document_pages.py       DocumentPage (provenance)
 │   ├── 0003_normalization.py        normalization status, merchant_aliases + seed
-│   └── 0004_analytics_budgets.py    budgets, category uniqueness fix, 10 system categories, indexes
+│   ├── 0004_analytics_budgets.py    budgets, category uniqueness fix, 10 system categories, indexes
+│   └── 0005_ml_layer.py             recurring_series; category/duplicate/anomaly provenance; self-FK indexes
 ├── app/
 │   ├── main.py
 │   ├── core/            config.py security.py storage.py celery_app.py
@@ -49,13 +53,22 @@ backend/
 │   ├── schemas/         auth account document transaction category budget analytics
 │   ├── api/
 │   │   ├── auth.py accounts.py documents.py transactions.py deps.py      (Phases 0–3)
-│   │   └── categories.py budgets.py analytics.py                          (Phase 4)
+│   │   ├── categories.py budgets.py analytics.py                          (Phase 4)
+│   │   └── ml.py   (+ suggestion/duplicate actions in transactions.py)    (Phase 5)
 │   ├── analytics/       (Phase 4)
 │   │   ├── common.py        Scope, shared WHERE clause, money/pct helpers, month math
 │   │   ├── cashflow.py      summary() and monthly()
 │   │   ├── breakdowns.py    by_category() by_merchant() by_account()
-│   │   └── budgets.py       utilization(), category_subtree_ids()
+│   │   ├── budgets.py       utilization(), category_subtree_ids()
+│   │   └── recurring.py     monthly-equivalent recurring totals (Phase 5)
+│   ├── ml/              (Phase 5)
+│   │   ├── taxonomy.py rules.py classifier.py llm_classifier.py
+│   │   ├── duplicates.py recurring.py anomalies.py      pure detectors
+│   │   ├── service.py       DB glue; enrich_user() runs all four steps in order
+│   │   ├── synthetic.py eval.py train.py eval_llm.py eval_public.py
+│   │   └── (models/ is git-ignored: `python -m app.ml.train` writes classifier.joblib + .meta.json)
 │   └── pipeline/        extractors/ (Phase 2)  normalize/ (Phase 3)  tasks.py
+├── docs/ml_eval/        report.md / report.json from `python -m app.ml.eval`
 ├── tests/               real-Postgres pytest suite (see "Testing")
 ├── pytest.ini  requirements.txt  requirements-dev.txt  Dockerfile  alembic.ini
 ```
@@ -152,6 +165,60 @@ A budget is `(category or overall, currency, monthly amount, alert threshold %)`
 
 ---
 
+## Phase 5: ML layer (design and exact behavior)
+
+### Pipeline and ordering
+`enrich_user()` runs, for one user: **duplicates → classification → recurring → anomalies.**
+Duplicates first because flagged rows are excluded from everything after; categories before
+anomalies because category baselines use them. It runs automatically (Celery
+`enrich_user_transactions`, chained after `normalize_document`) and on demand (`POST /ml/run`).
+Every step is idempotent, user-scoped, and serialized per user by a Postgres advisory lock
+(without it, two concurrent runs duplicated recurring series — tested).
+
+### Classification
+- Label set = the ten system categories from migration 0004. A debit can never be `Salary` (hard mask, applies to rules, ML and the LLM parser).
+- **Policy.** `rule` or `hybrid` (rule and ML agree) predictions → auto-applied (`category_source` = rule/hybrid). `ml`-only → suggestion only (`suggested_category_*`), because the measured ML-only precision on unseen merchants is ~30% and its confidence is not calibrated. The auto threshold for ML-only lives in the model metadata (`ml_only_auto_apply_threshold`); it is currently `null` = never. Below 0.5 → no prediction.
+- A confident ML disagreement (≥0.95) overrides a rule; otherwise the rule wins.
+- **Provenance rules.** `category_source='user'` is final (PATCH, accepting a suggestion). A category with no recorded source is treated as the user's. Rejecting a suggestion or clearing a category sets `suggestion_dismissed`, which even `force_reclassify` respects. `force_reclassify` re-evaluates only earlier machine decisions and clears ones the current model no longer backs.
+- **Model lifecycle.** `python -m app.ml.train` → synthetic data → `models/classifier.joblib` + `.meta.json` (sha256, sklearn version, metrics). If the file is missing, corrupt, or from a different scikit-learn version, the system degrades to **rules-only** and says so in `GET /ml/status` instead of failing. Pickle caveat: trusted-write directory only.
+- **Training data is synthetic** (`ml/synthetic.py`, ~240 merchants, Indian-bank-style narrations). Evaluation holds out whole merchants.
+
+### Duplicates
+Compared only within the same account, currency, direction and exact amount, within 3 days.
+`score = 0.45·date + 0.35·narration similarity + 0.20·cross-document`, ×0.25 if both narrations carry
+bank reference numbers that differ, ×0.5 for same-document "habit" repeats (≥4 in a week). ≥0.95 →
+`duplicate_of_id` set (analytics exclude the later row); 0.70–0.95 → `pending` for review; below → nothing.
+The later-uploaded document's row is the duplicate. `confirm` / `dismiss` are final and survive re-runs;
+the detector withdraws its own stale flags (e.g. if the original was deleted).
+
+### Recurring
+Per (account, currency, direction, merchant): distinct dates → intervals → snap median to
+weekly / biweekly / monthly (30.44 ± 4.5 d) / quarterly / yearly; ≥75% of intervals on cadence (a skipped period counts half);
+min occurrences 4/4/3/3/2. Amount: MAD/median ≤5% = fixed price, ≤50% = variable bill, else rejected. If the merchant as a whole
+fails, each ±5% amount cluster (needing one extra occurrence — see the chance-match fix below) is tried alone. `as_of` is the user's latest transaction date.
+`/analytics/recurring` totals = Σ typical amount × (52/12, 26/12, 1, 1/3, 1/12) per currency, active series only by default.
+
+### Anomalies
+Modified z = 0.6745·(ln x − median)/max(MAD, 0.15) against the merchant (≥8 txns), else category (≥15), else user-wide (≥30),
+per currency+direction; flag at z ≥ 3.5, upward only. No sufficient baseline → `anomaly_score` null (unknown, not normal).
+The 0.15 floor means a flat baseline needs a ≥2.2× jump to flag.
+
+### Things the evaluation caught (kept here because they changed the code or the claims)
+1. ML on unseen merchants: 42% accuracy, confidence anti-calibrated → ML-only never auto-applies.
+2. Recurring: "quarterly" false positives for busy merchants (Uber, 5/20 users) from lucky 3-point amount clusters → cluster path now requires one more occurrence; 0 false positives afterwards.
+3. Anomaly ground truth: my first injected anomalies (×6–15) were often only ~2σ for high-variance merchants — the data, not the detector, was at fault. Now two severities are reported separately; the detector's real weakness (recall 0.13 on moderate) is stated, not tuned away.
+4. Deleting a user with 100k transactions took >15 min: unindexed self-referencing FKs (`duplicate_of_id`, new `duplicate_candidate_of_id`). Partial indexes added in 0005.
+
+### Phase 5 tests
+83 new tests: `tests/test_ml_units.py` (pure algorithms: rule ordering, Salary-credit constraint, hybrid override, persistence failure modes,
+cadences, price rise, skipped month, chance clusters, duplicate thresholds/refs/habits/triplicates, anomaly floors/fallbacks/currency separation, LLM parser abuse cases),
+`tests/test_ml_service_api.py` (real Postgres + HTTP: auto vs suggest, user-final, reject-sticks, force semantics, duplicates through analytics, human decisions surviving re-runs,
+exact recurring totals, concurrent runs, cross-user isolation, 401s, the Celery task body) and the 0005 backfill/constraint/round-trip test. Verified separately (not in the suite):
+a real Celery worker on a real Redis broker running normalize → enrich; and the 100k-row timing run.
+The LLM tests use a stand-in client for *batching plumbing only* — they are not evidence that the real API works.
+
+---
+
 ## Known gaps and limitations (Phase 4)
 
 Deliberate scope cuts and unfixed weaknesses, stated plainly. The rolled-up
@@ -231,7 +298,7 @@ export TEST_DATABASE_URL=postgresql+psycopg://finsight:finsight_dev_password@loc
 pytest
 ```
 
-What's covered (60 tests): exact-decimal sums (1000 × 0.10 = 100.00); currency
+What's covered (Phase 4 portion, 60 of 143 tests; Phase 5 coverage is described above): exact-decimal sums (1000 × 0.10 = 100.00); currency
 separation; inclusive date boundaries, month/year/leap-day edges; gap-filled
 monthly series and partial flags; zero-denominator percentages; duplicate
 exclusion; category/merchant/account breakdowns incl. ties and `limit`; budget

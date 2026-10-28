@@ -45,7 +45,7 @@ def _scalar(engine, sql):
 
 def test_full_chain_and_roundtrip(engine):
     alembic("upgrade", "head")
-    assert _scalar(engine, "SELECT version_num FROM alembic_version") == "0004_analytics_budgets"
+    assert _scalar(engine, "SELECT version_num FROM alembic_version") == "0005_ml_layer"
     assert _scalar(engine, "SELECT count(*) FROM categories WHERE is_system AND user_id IS NULL") == 10
 
     # Phase 4 constraints, exercised in raw SQL
@@ -73,3 +73,38 @@ def test_full_chain_and_roundtrip(engine):
     alembic("upgrade", "head")
     assert _scalar(engine, "SELECT count(*) FROM categories WHERE is_system") == 10
     assert _scalar(engine, "SELECT to_regclass('public.budgets')") is not None
+
+
+def test_0005_backfill_constraints_and_roundtrip(engine):
+    """0005 must backfill provenance for rows that pre-date it, enforce its CHECKs, and fully reverse."""
+    alembic("upgrade", "head")  # the engine fixture may or may not already be at head
+    alembic("downgrade", "0004_analytics_budgets")
+    with engine.begin() as c:
+        c.execute(text("INSERT INTO users (email, hashed_password) VALUES ('b5@x.com', 'h')"))
+        uid = c.execute(text("SELECT id FROM users WHERE email='b5@x.com'")).scalar()
+        aid = c.execute(text(
+            "INSERT INTO accounts (user_id, name, account_type, currency) VALUES (:u,'a','checking','INR') RETURNING id"
+        ), {"u": uid}).scalar()
+        cat = c.execute(text("SELECT id FROM categories WHERE name='Food'")).scalar()
+        row = ("INSERT INTO transactions (user_id, account_id, category_id, duplicate_of_id, transaction_date, "
+               "description_raw, amount, currency, transaction_type) VALUES (:u,:a,:c,:d,now(),'x',10,'INR','debit') RETURNING id")
+        orig = c.execute(text(row), {"u": uid, "a": aid, "c": cat, "d": None}).scalar()
+        dup = c.execute(text(row), {"u": uid, "a": aid, "c": None, "d": orig}).scalar()
+
+    alembic("upgrade", "head")
+    with engine.connect() as c:
+        got = {r.id: r for r in c.execute(text("SELECT id, category_source, duplicate_review, duplicate_candidate_of_id FROM transactions"))}
+    assert got[orig].category_source == "user"          # a human was the only way a category could get set
+    assert got[dup].category_source is None
+    assert got[dup].duplicate_review == "confirmed" and got[dup].duplicate_candidate_of_id == orig
+
+    for bad in ("UPDATE transactions SET category_source='bogus'", "UPDATE transactions SET duplicate_review='maybe'"):
+        with pytest.raises(IntegrityError):
+            with engine.begin() as c:
+                c.execute(text(bad))
+
+    alembic("downgrade", "0004_analytics_budgets")
+    assert _scalar(engine, "SELECT to_regclass('public.recurring_series')") is None
+    assert _scalar(engine, "SELECT count(*) FROM information_schema.columns WHERE table_name='transactions' AND column_name='anomaly_score'") == 0
+    assert _scalar(engine, "SELECT count(*) FROM transactions") == 2  # data survives the round trip
+    alembic("upgrade", "head")

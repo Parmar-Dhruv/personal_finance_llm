@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Float,
     Index,
     Numeric,
     String,
@@ -84,6 +85,13 @@ class ExtractionMethod(str, enum.Enum):
     # CSV/XLSX — parsed directly as rows/columns, no OCR or text-layer
     # concept applies.
     tabular = "tabular"
+
+
+# Phase 5 provenance vocabularies. Plain strings + CHECK constraints (not PG
+# enums) so adding a value later is a one-line migration, not the
+# ALTER TYPE ... ADD VALUE transaction restriction noted in Session 1.
+CATEGORY_SOURCES = ("user", "rule", "ml", "hybrid", "llm")
+DUPLICATE_REVIEWS = ("auto", "pending", "confirmed", "dismissed")
 
 
 class User(TimestampMixin, Base):
@@ -162,7 +170,9 @@ class Category(TimestampMixin, Base):
     user: Mapped["User | None"] = relationship(back_populates="categories")
     parent: Mapped["Category | None"] = relationship(remote_side=[id], back_populates="children")
     children: Mapped[list["Category"]] = relationship(back_populates="parent")
-    transactions: Mapped[list["Transaction"]] = relationship(back_populates="category")
+    transactions: Mapped[list["Transaction"]] = relationship(
+        back_populates="category", foreign_keys="Transaction.category_id"
+    )
 
 
 class Budget(TimestampMixin, Base):
@@ -339,9 +349,64 @@ class DocumentPage(TimestampMixin, Base):
     document: Mapped["Document"] = relationship(back_populates="pages")
 
 
+class RecurringSeries(TimestampMixin, Base):
+    """
+    Phase 5: one detected recurring payment stream (subscription, rent, a
+    utility, salary...). Fully derived data -- every detection run deletes
+    and recreates a user's series, so ids are NOT stable across runs and
+    nothing should store them long-term.
+    """
+
+    __tablename__ = "recurring_series"
+    __table_args__ = (
+        Index("ix_recurring_series_user_active", "user_id", "is_active"),
+        CheckConstraint("occurrence_count >= 2", name="ck_recurring_occurrences"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=PK_DEFAULT
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    merchant: Mapped[str] = mapped_column(String(255), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    transaction_type: Mapped[TransactionType] = mapped_column(
+        Enum(TransactionType, name="transaction_type", create_type=False), nullable=False
+    )
+    # weekly | biweekly | monthly | quarterly | yearly
+    cadence: Mapped[str] = mapped_column(String(20), nullable=False)
+    interval_days: Mapped[float] = mapped_column(Float, nullable=False)
+    typical_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    # True for bills whose amount drifts (utilities) rather than a fixed
+    # subscription price.
+    amount_variable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    occurrence_count: Mapped[int] = mapped_column(nullable=False)
+    first_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    next_expected_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    # False once the stream has gone quiet for > 1.5 intervals as of the
+    # user's latest transaction (cancelled subscription, moved flat).
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
 class Transaction(TimestampMixin, Base):
     __tablename__ = "transactions"
-    __table_args__ = (Index("ix_transactions_user_category", "user_id", "category_id"),)
+    __table_args__ = (
+        Index("ix_transactions_user_category", "user_id", "category_id"),
+        CheckConstraint(
+            "category_source IS NULL OR category_source IN ('user','rule','ml','hybrid','llm')",
+            name="ck_transaction_category_source",
+        ),
+        CheckConstraint(
+            "duplicate_review IS NULL OR duplicate_review IN ('auto','pending','confirmed','dismissed')",
+            name="ck_transaction_duplicate_review",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=PK_DEFAULT
@@ -383,12 +448,48 @@ class Transaction(TimestampMixin, Base):
     is_anomaly: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_recurring: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # --- Phase 5: ML-layer provenance --------------------------------
+    # Who set category_id: 'user' (never overwritten by any ML job) or the
+    # classifier that auto-applied it ('rule'|'ml'|'hybrid'|'llm'). NULL iff
+    # category_id is NULL.
+    category_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    category_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # A below-auto-threshold prediction waiting for a human. Never read by
+    # analytics -- only category_id is.
+    suggested_category_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("categories.id", ondelete="SET NULL"), nullable=True
+    )
+    suggested_category_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    suggested_category_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # User rejected the suggestion: classification runs skip this row.
+    suggestion_dismissed: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default=text("false")
+    )
+    # Duplicate detection. duplicate_of_id (above) is what analytics honors;
+    # these record why, and what a human decided.
+    duplicate_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    duplicate_candidate_of_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("transactions.id", ondelete="SET NULL"), nullable=True
+    )
+    duplicate_review: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    anomaly_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Baseline used for the score (level, n, median, mad...) so a flag is
+    # explainable without re-running the detector.
+    anomaly_detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    recurring_series_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("recurring_series.id", ondelete="SET NULL"), nullable=True
+    )
+
     # Unstructured extraction payload (raw OCR/parser output) kept for
     # audit/debugging without polluting the typed schema above.
     raw_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="transactions")
     account: Mapped["Account"] = relationship(back_populates="transactions")
-    category: Mapped["Category | None"] = relationship(back_populates="transactions")
+    category: Mapped["Category | None"] = relationship(
+        back_populates="transactions", foreign_keys=[category_id]
+    )
     source_document: Mapped["Document | None"] = relationship(back_populates="transactions")
-    duplicate_of: Mapped["Transaction | None"] = relationship(remote_side=[id])
+    duplicate_of: Mapped["Transaction | None"] = relationship(
+        remote_side=[id], foreign_keys=[duplicate_of_id]
+    )

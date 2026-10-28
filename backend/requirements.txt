@@ -57,3 +57,12 @@ python-dateutil
 # rapidfuzz, not fuzzywuzzy/thefuzz: MIT vs GPL — same license-hygiene
 # call already made for PyMuPDF/Ghostscript/Garage in earlier phases.
 rapidfuzz
+
+# --- ML layer (Phase 5) ---
+# scikit-learn (BSD-3), numpy (BSD-3), joblib (BSD-3): classifier, Isolation
+# Forest benchmark, model persistence. Versions confirmed current on PyPI
+# 2026-10-26 (scikit-learn 1.9.1, numpy 2.5.x, joblib 1.6.0). A saved model is
+# tied to the exact scikit-learn version that trained it (see classifier.py).
+scikit-learn
+numpy
+joblib

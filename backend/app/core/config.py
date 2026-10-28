@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     voyage_api_key: str | None = None
 
+    # Phase 5. Empty = <backend>/models. The model file is a pickle: only ever
+    # point this at a directory this application (or you) wrote.
+    ml_model_dir: str = ""
+    # Opt-in: sends transaction narrations to the Anthropic API. Off by default.
+    llm_classifier_enabled: bool = False
+    # UNVERIFIED model id (no API key in the build sandbox) -- confirm before enabling.
+    llm_classifier_model: str = "claude-haiku-5-5"
+
     backend_cors_origins: str = "http://localhost:3000"
 
     @property

@@ -22,6 +22,21 @@ class TransactionRead(BaseModel):
     is_anomaly: bool
     is_recurring: bool
     created_at: datetime
+    # Phase 5 provenance. category_source says who set category_id: 'user'
+    # (never touched by ML) or the machine path that auto-applied it.
+    category_source: str | None = None
+    category_confidence: float | None = None
+    suggested_category_id: uuid.UUID | None = None
+    suggested_category_confidence: float | None = None
+    suggested_category_source: str | None = None
+    # duplicate_of_id is what analytics honors; review says why/what a human decided.
+    duplicate_of_id: uuid.UUID | None = None
+    duplicate_candidate_of_id: uuid.UUID | None = None
+    duplicate_score: float | None = None
+    duplicate_review: str | None = None
+    anomaly_score: float | None = None
+    anomaly_detail: dict | None = None
+    recurring_series_id: uuid.UUID | None = None
 
     model_config = {"from_attributes": True}
 

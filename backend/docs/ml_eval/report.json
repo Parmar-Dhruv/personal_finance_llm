@@ -1,0 +1,361 @@
+{
+ "classification": {
+  "n": 9000,
+  "merchants": 237,
+  "folds": 5,
+  "train_label_noise": 0.02,
+  "rules": {
+   "accuracy": 0.8196,
+   "macro_f1": 0.9121,
+   "coverage": 0.8283,
+   "precision_on_answered": 0.9894
+  },
+  "ml": {
+   "accuracy": 0.4199,
+   "macro_f1": 0.5097
+  },
+  "hybrid": {
+   "accuracy": 0.8643,
+   "macro_f1": 0.8908
+  },
+  "seen_merchants": {
+   "ml": {
+    "accuracy": 0.997,
+    "macro_f1": 0.9976
+   },
+   "hybrid": {
+    "accuracy": 0.9944,
+    "macro_f1": 0.9952
+   }
+  },
+  "by_source_unseen": {
+   "rule": {
+    "share_of_rows": 0.4538,
+    "precision": 0.9865
+   },
+   "hybrid": {
+    "share_of_rows": 0.3659,
+    "precision": 0.9927
+   },
+   "ml": {
+    "share_of_rows": 0.1803,
+    "precision": 0.2964
+   }
+  },
+  "ml_only_sweep_unseen": [
+   {
+    "threshold": 0.5,
+    "rows": 547,
+    "precision": 0.4406
+   },
+   {
+    "threshold": 0.7,
+    "rows": 285,
+    "precision": 0.414
+   },
+   {
+    "threshold": 0.8,
+    "rows": 149,
+    "precision": 0.2483
+   },
+   {
+    "threshold": 0.9,
+    "rows": 103,
+    "precision": 0.165
+   },
+   {
+    "threshold": 0.95,
+    "rows": 92,
+    "precision": 0.1087
+   },
+   {
+    "threshold": 0.99,
+    "rows": 2,
+    "precision": 0.0
+   }
+  ],
+  "hybrid_threshold_sweep": [
+   {
+    "threshold": 0.5,
+    "coverage": 0.8804,
+    "precision": 0.9514
+   },
+   {
+    "threshold": 0.6,
+    "coverage": 0.8633,
+    "precision": 0.9618
+   },
+   {
+    "threshold": 0.7,
+    "coverage": 0.8513,
+    "precision": 0.9679
+   },
+   {
+    "threshold": 0.8,
+    "coverage": 0.8362,
+    "precision": 0.9746
+   },
+   {
+    "threshold": 0.9,
+    "coverage": 0.8311,
+    "precision": 0.9779
+   },
+   {
+    "threshold": 0.95,
+    "coverage": 0.0829,
+    "precision": 0.8861
+   },
+   {
+    "threshold": 0.99,
+    "coverage": 0.0349,
+    "precision": 0.9936
+   }
+  ],
+  "hybrid_per_class_f1": {
+   "Food": 0.842,
+   "Transportation": 0.772,
+   "Shopping": 0.815,
+   "Utilities": 0.881,
+   "Entertainment": 0.904,
+   "Healthcare": 0.948,
+   "Travel": 0.828,
+   "Rent": 0.985,
+   "Salary": 0.998,
+   "Business expenses": 0.936
+  },
+  "hybrid_confusion": {
+   "labels": [
+    "Food",
+    "Transportation",
+    "Shopping",
+    "Utilities",
+    "Entertainment",
+    "Healthcare",
+    "Travel",
+    "Rent",
+    "Salary",
+    "Business expenses",
+    "__none__"
+   ],
+   "matrix": [
+    [
+     1676,
+     178,
+     193,
+     11,
+     32,
+     4,
+     29,
+     0,
+     0,
+     8,
+     0
+    ],
+    [
+     112,
+     907,
+     49,
+     17,
+     14,
+     2,
+     21,
+     0,
+     0,
+     46,
+     0
+    ],
+    [
+     22,
+     25,
+     1223,
+     97,
+     2,
+     2,
+     22,
+     6,
+     1,
+     2,
+     0
+    ],
+    [
+     22,
+     16,
+     23,
+     757,
+     1,
+     3,
+     10,
+     0,
+     0,
+     3,
+     0
+    ],
+    [
+     5,
+     35,
+     14,
+     0,
+     620,
+     0,
+     4,
+     0,
+     0,
+     24,
+     0
+    ],
+    [
+     6,
+     16,
+     11,
+     0,
+     0,
+     509,
+     6,
+     0,
+     0,
+     3,
+     0
+    ],
+    [
+     2,
+     1,
+     37,
+     2,
+     1,
+     2,
+     376,
+     2,
+     0,
+     5,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     268,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     259,
+     0,
+     0
+    ],
+    [
+     4,
+     4,
+     51,
+     0,
+     0,
+     1,
+     12,
+     0,
+     0,
+     1184,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   ]
+  },
+  "ml_calibration": [
+   {
+    "bin": "0.0-0.5",
+    "n": 4935,
+    "mean_confidence": 0.341,
+    "accuracy": 0.271
+   },
+   {
+    "bin": "0.5-0.7",
+    "n": 1651,
+    "mean_confidence": 0.592,
+    "accuracy": 0.423
+   },
+   {
+    "bin": "0.7-0.9",
+    "n": 1275,
+    "mean_confidence": 0.804,
+    "accuracy": 0.623
+   },
+   {
+    "bin": "0.9-1.0",
+    "n": 1139,
+    "mean_confidence": 0.963,
+    "accuracy": 0.832
+   }
+  ]
+ },
+ "ml_only_auto_apply_threshold": null,
+ "recurring": {
+  "users": 20,
+  "series_precision": 1.0,
+  "series_recall": 0.9714,
+  "series_f1": 0.9855,
+  "cadence_correct_given_found": 1.0,
+  "member_precision": 1.0,
+  "false_positive_merchants": {}
+ },
+ "duplicates": {
+  "pending_or_auto": {
+   "threshold": 0.7,
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "points_at_wrong_original": 0,
+   "hard_negative_flags_at_threshold": 0
+  },
+  "auto_only": {
+   "threshold": 0.95,
+   "precision": 1.0,
+   "recall": 0.587,
+   "f1": 0.7397,
+   "points_at_wrong_original": 0,
+   "hard_negative_flags_at_threshold": 0
+  }
+ },
+ "anomalies": {
+  "users": 20,
+  "positives": 180,
+  "rows": 11592,
+  "robust_z_at_3.5": {
+   "precision": 0.8904,
+   "recall": 0.3611,
+   "f1": 0.5138
+  },
+  "recall_by_severity": {
+   "moderate": 0.125,
+   "severe": 0.55
+  },
+  "pr_auc": {
+   "robust_z_hierarchical": 0.6318,
+   "iqr_merchant": 0.6363,
+   "isolation_forest": 0.3554
+  },
+  "base_rate": 0.0155
+ }
+}

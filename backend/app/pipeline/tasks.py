@@ -110,6 +110,7 @@ def normalize_document(self, document_id: str) -> None:
     also callable directly (POST /documents/{id}/normalize) for re-runs
     after an account gets assigned post-upload, or after any other fix.
     """
+    chain_user_id: str | None = None
     db = SessionLocal()
     try:
         document = db.get(Document, uuid.UUID(document_id))
@@ -141,6 +142,7 @@ def normalize_document(self, document_id: str) -> None:
         document.normalization_status = NormalizationStatus.normalized
         document.normalized_at = datetime.now(timezone.utc)
         document.normalization_error = None
+        chain_user_id = str(document.user_id)
         db.commit()
 
     except Exception as exc:
@@ -150,6 +152,35 @@ def normalize_document(self, document_id: str) -> None:
             document.normalization_status = NormalizationStatus.failed
             document.normalization_error = (str(exc) or repr(exc))[:2000]
             db.commit()
+        raise
+    finally:
+        db.close()
+
+    # Same chaining rule as process_document -> normalize_document: only after
+    # normalization is committed and its session closed, and a failure in the
+    # ML step is never reported as a normalization failure (separate task,
+    # separate failure surface; the document stays `normalized`).
+    if chain_user_id is not None:
+        enrich_user_transactions.delay(chain_user_id)
+
+
+@celery_app.task(name="enrich_user_transactions", bind=True, max_retries=3)
+def enrich_user_transactions(self, user_id: str) -> dict:
+    """
+    Phase 5: duplicates -> classification -> recurring -> anomalies for one
+    user. Whole-user (not per-document) on purpose: duplicate, recurring and
+    anomaly detection are properties of the user's entire history, so a new
+    upload can change old rows' flags. Idempotent; safe to run twice.
+    """
+    from app.ml.service import enrich_user  # local import: keeps sklearn out of the worker's import path until needed
+
+    db = SessionLocal()
+    try:
+        result = enrich_user(db, uuid.UUID(user_id))
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
         raise
     finally:
         db.close()

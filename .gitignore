@@ -26,3 +26,6 @@ pgdata/
 
 # Test artifacts
 .pytest_cache/
+
+# Trained model artifacts (pickles) -- regenerate with `python -m app.ml.train`
+backend/models/

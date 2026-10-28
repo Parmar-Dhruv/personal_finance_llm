@@ -6,7 +6,7 @@ data normalization → (eventually) analytics, RAG, and agentic
 natural-language Q&A, with every answer traceable back to a source
 document and page.
 
-**Status: Phases 0–4 of 13 complete.** This README describes what's
+**Status: Phases 0–5 of 13 complete.** This README describes what's
 actually built and running today, not the end-state design — for the
 full 13-phase target architecture and design rationale, see
 [`personal_finance_llm.md`](./personal_finance_llm.md). For the
@@ -25,16 +25,17 @@ snapshot; that file is the source of truth.
 | 2 — Document intelligence | ✅ | OCR, table extraction, per-page provenance |
 | 3 — Data normalization | ✅ | Dates/amounts/currency → structured `Transaction` rows, merchant canonicalization |
 | 4 — Deterministic analytics | ✅ | Income/expense/net cash flow, monthly trends, category/merchant/account summaries, monthly budgets + utilization — all SQL/`Decimal`, per currency |
-| 5 — ML layer | ⬜ next | Transaction classification, duplicate / recurring / anomaly detection |
+| 5 — ML layer | ✅ | Rule + ML transaction classification (suggest-first, never overwrites you), duplicate detection with a review queue, recurring-payment detection (+ recurring totals), robust-statistics anomaly flags. **Measured on synthetic data only — read the Phase 5 caveats below.** |
 | 6–13 | ⬜ | Forecasting, RAG, agentic Q&A, product features, evaluation, security hardening, frontend, deployment |
 
 A document today flows: **upload → object storage → OCR/table
 extraction (Celery) → date/amount/merchant normalization (Celery,
 auto-chained) → queryable `Transaction` rows → deterministic analytics and
-budget utilization via API.** There is no automatic categorization (Phase 5),
-no forecasting, and no LLM calls anywhere (by design; see
-`personal_finance_llm.md` §17 on the deterministic/ML/LLM separation
-principle). Categories can currently only be assigned by hand.
+budget utilization via API → (Celery, auto-chained) duplicate / category /
+recurring / anomaly enrichment.** There is no forecasting and no LLM call
+anywhere in the running system (an LLM classifier exists as an *unverified,
+off-by-default interface*; see Phase 5 caveats). Categories are assigned by
+rules/ML when confident, suggested when not, and always overridable by hand.
 
 ---
 
@@ -50,15 +51,22 @@ Backend API (FastAPI)
       │       cash flow · monthly trends · category/merchant/account breakdowns ·
       │       budget utilization
       │
+      ├──► ML layer (app/ml — pure Python/sklearn, DB only via ml/service.py)   # Phase 5
+      │       rules + TF-IDF/LogReg classifier · duplicates · recurring · anomalies
+      │
       ├──► Postgres 18 + pgvector  (users, accounts, documents, document_pages,
-      │                             transactions, merchant_aliases, categories, budgets)
+      │                             transactions, merchant_aliases, categories, budgets,
+      │                             recurring_series)
       ├──► SeaweedFS (S3-compatible object storage — original documents)
       └──► Valkey  ──► Celery workers
                           │
                           ├─ process_document     (Phase 2: OCR / table extraction)
-                          └─ normalize_document    (Phase 3: dates/amounts/merchants
-                                                     → Transaction rows)
-                             auto-chained after process_document succeeds
+                          ├─ normalize_document    (Phase 3: dates/amounts/merchants
+                          │                          → Transaction rows)
+                          │    auto-chained after process_document succeeds
+                          └─ enrich_user_transactions (Phase 5: duplicates → categories →
+                                                       recurring → anomalies, whole-user)
+                             auto-chained after normalize_document succeeds
 ```
 
 Analytics read the `Transaction` table directly and never write to it.
@@ -79,7 +87,7 @@ phase is meant to build on.
 **Core design principle carried through every phase:** deterministic
 code for what must be correct (parsing, arithmetic), ML for what must
 be predicted (later phases), LLMs for what needs flexible language
-understanding (later phases). Phases 0–4 contain zero LLM calls.
+understanding (later phases). Phases 0–5 contain zero LLM calls in the running system.
 
 ---
 
@@ -99,13 +107,15 @@ personal_finance_llm/
 │   ├── requirements.txt
 │   ├── requirements-dev.txt               # pytest + httpx
 │   ├── pytest.ini
-│   ├── tests/                             # 60 real-Postgres tests (analytics, budgets, categories, migrations, pipeline seam)
+│   ├── docs/ml_eval/                      # Phase 5 evaluation report (report.md / report.json), regenerate: python -m app.ml.eval
+│   ├── tests/                             # 143 real-Postgres tests (Phase 4: 60; Phase 5: pure-algorithm units + DB/HTTP integration)
 │   ├── alembic/
 │   │   └── versions/
 │   │       ├── 0001_initial_schema.py     # users, accounts, categories, documents, transactions
 │   │       ├── 0002_document_pages.py     # DocumentPage + provenance fields (Phase 2)
 │   │       ├── 0003_normalization.py      # normalization_status fields, merchant_aliases + seed data (Phase 3)
-│   │       └── 0004_analytics_budgets.py  # budgets, category uniqueness fix, 10 system categories (Phase 4)
+│   │       ├── 0004_analytics_budgets.py  # budgets, category uniqueness fix, 10 system categories (Phase 4)
+│   │       └── 0005_ml_layer.py           # recurring_series, category/duplicate/anomaly provenance columns + indexes (Phase 5)
 │   └── app/
 │       ├── main.py                        # FastAPI app, router registration, /health
 │       ├── core/
@@ -123,23 +133,36 @@ personal_finance_llm/
 │       │   ├── transaction.py
 │       │   ├── category.py                # Phase 4
 │       │   ├── budget.py                  # Phase 4
-│       │   └── analytics.py               # Phase 4
+│       │   ├── analytics.py               # Phase 4
+│       │   └── ml.py                      # Phase 5
 │       ├── api/                           # FastAPI routers
 │       │   ├── auth.py                    # /auth/signup, /auth/login, /auth/me
 │       │   ├── accounts.py                # /accounts (create, list)
 │       │   ├── documents.py               # /documents (upload, list, get, patch, delete, pages, normalize)
-│       │   ├── transactions.py            # /transactions (list, get, patch category)
+│       │   ├── transactions.py            # /transactions (list, get, patch category; Phase 5: suggestion + duplicate review actions)
 │       │   ├── categories.py              # /categories (create, list) — Phase 4
 │       │   ├── budgets.py                 # /budgets (CRUD) — Phase 4
-│       │   ├── analytics.py               # /analytics/* (read-only) — Phase 4
+│       │   ├── analytics.py               # /analytics/* (read-only) — Phase 4 (+ /analytics/recurring, Phase 5)
+│       │   ├── ml.py                      # /ml/* run, status, suggestions, duplicates, recurring, anomalies — Phase 5
 │       │   └── deps.py                    # get_current_user, get_db, ownership helpers
 │       ├── analytics/                     # Phase 4 — deterministic analytics (no FastAPI imports)
 │       │   ├── common.py                  # Scope, shared filters, money/percent/month helpers
 │       │   ├── cashflow.py                # summary(), monthly()
 │       │   ├── breakdowns.py              # by_category(), by_merchant(), by_account()
-│       │   └── budgets.py                 # utilization(), category subtree roll-up
+│       │   ├── budgets.py                 # utilization(), category subtree roll-up
+│       │   └── recurring.py               # recurring monthly-equivalent totals (Phase 5)
+│       ├── ml/                            # Phase 5 — see "Phase 5: ML layer" below
+│       │   ├── taxonomy.py                # the 10 labels + credit-only constraint
+│       │   ├── rules.py                   # ordered regex rule classifier (baseline)
+│       │   ├── classifier.py              # TF-IDF + LogReg, hybrid policy, model persistence
+│       │   ├── duplicates.py  recurring.py  anomalies.py   # pure detectors, no DB
+│       │   ├── service.py                 # the only DB-touching module; per-user advisory lock
+│       │   ├── synthetic.py               # synthetic labeled data + user histories
+│       │   ├── eval.py  train.py          # evaluation harness; model training CLI
+│       │   ├── llm_classifier.py          # UNVERIFIED interface (no API key was available)
+│       │   └── eval_llm.py  eval_public.py  # scripts for YOU to run (need a key / HF access)
 │       └── pipeline/
-│           ├── tasks.py                   # Celery tasks: process_document, normalize_document
+│           ├── tasks.py                   # Celery tasks: process_document, normalize_document, enrich_user_transactions
 │           ├── extractors/                # Phase 2 — document intelligence
 │           │   ├── pdf.py                 # pdfplumber + pypdfium2
 │           │   ├── image.py
@@ -160,7 +183,7 @@ personal_finance_llm/
 
 ---
 
-## Data model (as of Phase 4)
+## Data model (as of Phase 5)
 
 - **User** — auth identity
 - **Account** — a bank/card account a user owns; `currency` (ISO code),
@@ -181,11 +204,20 @@ personal_finance_llm/
   (`is_system=True`, `user_id=NULL`) or user-defined
 - **Category** — system categories (`user_id NULL`; ten seeded by
   migration 0004, from the spec) plus user-created ones, up to 3 levels
-  deep. `Transaction.category_id` is set manually via the API today;
-  Phase 5's classifier will write the same column
+  deep. `Transaction.category_id` is written by you (`category_source='user'`,
+  final) or auto-applied by rules/ML (`category_source` = rule/hybrid/ml/llm)
 - **Budget** (Phase 4) — a monthly limit for one `(category | overall,
   currency)`: `amount`, `alert_threshold_pct`, `is_active`. At most one
   per `(user, category, currency)`, enforced by the database
+- **Transaction, Phase 5 additions** — `category_source` / `category_confidence`;
+  a pending `suggested_category_*` triple; `duplicate_score`,
+  `duplicate_candidate_of_id`, `duplicate_review` (auto/pending/confirmed/dismissed)
+  alongside the existing `duplicate_of_id` that analytics honor; `anomaly_score`
+  + `anomaly_detail` (the baseline used) with `is_anomaly`; `recurring_series_id`
+  with `is_recurring`
+- **RecurringSeries** (Phase 5) — one detected stream: merchant, cadence,
+  typical amount, fixed vs variable, confidence, active, next expected date.
+  Fully derived: deleted and recreated every run, so its ids are not stable
 
 ---
 
@@ -208,9 +240,18 @@ GET    /documents/{id}/pages           extracted pages (evidence view)
 GET    /documents/{id}/download-url    presigned URL, 5 min expiry
 POST   /documents/{id}/normalize       manually (re-)trigger Phase 3 normalization
 
-GET    /transactions                   ?account_id&date_from&date_to&limit&offset
+GET    /transactions                   ?account_id&date_from&date_to&is_anomaly&is_recurring&limit&offset
 GET    /transactions/{id}
-PATCH  /transactions/{id}              {category_id | null}  — assign / clear category
+PATCH  /transactions/{id}              {category_id | null}  — assign / clear (final: ML never overrides)
+POST   /transactions/{id}/suggestion/accept | reject     Phase 5 — act on a category suggestion
+POST   /transactions/{id}/duplicate/confirm | dismiss    Phase 5 — act on a duplicate candidate
+
+POST   /ml/run                         {force_reclassify?} duplicates→categories→recurring→anomalies (synchronous)
+GET    /ml/status                      rules-only vs rules+ML, model metadata, thresholds
+GET    /ml/suggestions                 pending category suggestions
+GET    /ml/duplicates                  ?review=pending|auto|confirmed|dismissed
+GET    /ml/recurring                   detected recurring series
+GET    /ml/anomalies                   flagged transactions, most extreme first
 
 POST   /categories                     {name, parent_id?}
 GET    /categories                     system + your own
@@ -227,6 +268,7 @@ GET    /analytics/categories           ?type=debit|credit&limit
 GET    /analytics/merchants            ?type=debit|credit&limit=10
 GET    /analytics/accounts             per-account summary (idle accounts included)
 GET    /analytics/budget-utilization   ?month=YYYY-MM  → limit/spent/remaining/pct/status per budget
+GET    /analytics/recurring            monthly-equivalent recurring expense/income per currency (Phase 5)
 
 GET    /health                         real Postgres + Valkey connectivity check
 ```
@@ -244,6 +286,8 @@ cp .env.example .env
 
 docker compose up --build
 docker compose exec backend alembic upgrade head
+docker compose exec backend python -m app.ml.train   # Phase 5: train the classifier (seconds). Without it the
+                                                     # system runs rules-only and says so at GET /ml/status
 ```
 
 - Frontend: http://localhost:3000
@@ -263,7 +307,9 @@ POST /documents/upload?account_id=<id>             # upload a statement
 GET  /transactions?account_id=<id>                  # see the normalized result
 GET  /analytics/summary                             # income / expense / net per currency
 GET  /analytics/monthly                             # month-by-month trend
-PATCH /transactions/{id} {"category_id": ...}       # categorize by hand (Phase 5 will automate)
+POST /ml/run                                        # (also auto-runs after each upload) categorize / dedupe / recurring / anomalies
+GET  /ml/suggestions                                # review what the classifier wasn't sure about
+PATCH /transactions/{id} {"category_id": ...}       # or categorize by hand — always final
 POST /budgets {"currency":"INR","amount":"10000"}   # overall monthly budget
 GET  /analytics/budget-utilization?month=2026-08
 ```
@@ -293,8 +339,6 @@ Known Gaps; the load-bearing ones:
   per currency, and there's no "everything combined" number for a user
   holding both INR and USD accounts.
 - Budgets are calendar-monthly only (no weekly/yearly/rollover/forecast).
-- No automatic transaction categorization — Phase 5. Until then category
-  summaries are mostly "Uncategorized" unless you assign categories by hand.
 
 **Heuristic limitations (real, not yet hardened):**
 - A single "Amount" column with no sign, no Cr/Dr suffix, and no
@@ -319,7 +363,7 @@ Known Gaps; the load-bearing ones:
 - Analytics trust Phase 3's debit/credit call and ignore `confidence_score` —
   a low-confidence row is summed like any other.
 - Category breakdown is direct-assignment only; budgets roll up descendants.
-- No "recurring expense totals" yet — depends on Phase 5 recurring detection.
+- Recurring expense totals now exist (`/analytics/recurring`) but are only as good as the detector (see Phase 5).
 - Computed live per request, no caching. Measured ≈46 ms all-time summary for
   one user with 104k rows on Postgres 16 in the dev sandbox; not benchmarked
   on PG18 or under concurrent load.
@@ -341,12 +385,66 @@ Known Gaps; the load-bearing ones:
 
 ---
 
+## Phase 5: ML layer — what it does, and how far to trust it
+
+**What each piece is**
+
+| Component | Method | Learned? |
+|---|---|---|
+| Classification | Ordered regex rules → TF-IDF (char + word n-grams) + logistic regression → hybrid policy | rules no, ML yes (synthetic data only) |
+| Duplicates | Hand-weighted score: date proximity, narration similarity, cross-document, bank reference numbers | no |
+| Recurring | Interval/cadence regularity + amount-band test per merchant | no |
+| Anomalies | Robust z-score (median/MAD) on log-amount, merchant → category → user-wide baseline | no |
+
+**What it is allowed to change on its own.** Rule-backed (or rule+ML-agreeing)
+categories are auto-applied. ML-only predictions are *never* auto-applied — they
+become suggestions you accept or reject. A category you set is final: no ML job,
+including a forced re-run, overwrites it. Duplicates are auto-applied only when
+the same payment appears on the same date in two *different* documents with the same
+bank reference (analytics then exclude the later row); everything weaker waits in a
+review queue (`GET /ml/duplicates`). Nothing is ever deleted. Anomalies are flags
+for you to look at, not fraud verdicts.
+
+**Measured results** (full tables: [`backend/docs/ml_eval/report.md`](./backend/docs/ml_eval/report.md)).
+All data is **synthetic and written by the same author as the models**, so treat the numbers as
+a comparison between methods, not as a forecast of real-world accuracy.
+
+| | Result |
+|---|---|
+| Classification, **unseen merchants** (5-fold CV grouped by merchant) | Rules 82% accuracy (abstaining counts as wrong; 99% precise when they answer, 83% coverage) · ML alone **42%** · Hybrid 86% |
+| Classification, **seen merchants** | ML 99.7% — this mostly shows the model memorises its ~240 training merchants |
+| ML-only predictions on unseen merchants | **30% precise**, and confidence is *anti*-calibrated (≥0.9 confidence → 17% precise). Hence: never auto-applied |
+| Recurring | series precision 1.00 / recall 0.97 on 20 synthetic users; missed: monthly bills whose date wanders more than ±4.5 days month to month |
+| Duplicates | P/R 1.00 on synthetic re-uploads (exact copies — real exports differ more); 0 flags on hard negatives (daily fare, two identical chais with different refs). Auto-apply recall only 0.59 by design |
+| Anomalies | at threshold 3.5: precision 0.89, recall 0.36 overall — 0.55 on "severe" injections, 0.13 on "moderate" ones. PR-AUC: robust-z 0.63 ≈ IQR 0.64 ≫ Isolation Forest 0.36 |
+| Cost at scale | 100k transactions for one user: duplicates 3 s, classify 77 s, recurring 3 s, anomalies 41 s; ~0.8 GB peak RSS (Postgres 16, no concurrency) |
+
+**What the ML classifier actually tells you.** It is a lookup of merchant names it has
+seen, with some tolerance for typos and truncation. On a merchant it never saw it is
+mostly guessing. The honest fixes are real or user-corrected labels (not yet built) and/or
+an LLM's world knowledge (interface built, **never run against the real API** — no key in the
+build sandbox).
+
+**Not done / not verified (Phase 5)**
+- **LLM classifier: unverified.** `app/ml/llm_classifier.py` + `python -m app.ml.eval_llm` exist; only prompt construction and response validation are tested. Model id in settings is a best guess. Off by default; enabling sends narrations to Anthropic's API.
+- **Public-dataset out-of-distribution check: not run.** huggingface.co is unreachable from the sandbox. `python -m app.ml.eval_public` is provided with a lossy label map; its MIT label doesn't settle where the underlying rows came from.
+- **No feedback loop.** Your corrections are stored (`category_source='user'`) but nothing retrains on them yet — this is the highest-value next step for the classifier.
+- Rules were written by the same person as the test merchants — expect lower precision on real statements.
+- Anomaly detection can only flag *unusually large* amounts, needs history (≥8 txns for the merchant, ≥15 for the category, or ≥30 user-wide, per currency and direction), and cannot see a charge ≤2.2× a perfectly flat baseline (e.g. rent 22,000 → 40,000 is not flagged).
+- Recurring: daily cadence not modeled; a price change is absorbed into one series (typical amount = latest); a series is "inactive" once it is silent for 1.5 intervals *relative to your newest transaction*, not today's date.
+- Duplicate score weights are hand-set, not learned; transfers between your own accounts and credit-card bill payments are still not detected (Phase 4 gap persists).
+- Model file is a pickle (trusted-write-only directory; sha256 sidecar detects corruption, not tampering). Not baked into the Docker image — run `python -m app.ml.train`; Docker build was not exercised.
+- `POST /ml/run` is synchronous (≈2 min at 100k rows). `requirements.lock.txt` is UTF-16 (pre-existing) and does not yet list scikit-learn; regenerate it with `pip freeze`.
+- Phase 3 merchant cleaning leaves bank codes in some NEFT merchants (e.g. "Hdfc0001234-Infosys Ltd-Salary"); harmless to detection here but ugly.
+
+---
+
 ## Testing approach
 
 Every phase is tested against real infrastructure — real Postgres, real
 SeaweedFS, a real Celery worker on a real broker, real HTTP requests —
 never mocks. From Phase 4 on, the Postgres-backed tests are a committed
-pytest suite (`backend/tests/`, 60 tests; run instructions in
+pytest suite (`backend/tests/`, 143 tests; run instructions in
 `backend/README.md`) rather than throwaway scripts; earlier phases'
 SeaweedFS / Celery / OCR checks were run ad hoc and are *not* part of that
 suite. Where the sandbox used for development lacks a service
@@ -363,10 +461,7 @@ in `PROGRESS_TRACKER.md`.
 
 ## Next up
 
-**Phase 5 — ML layer**: transaction classification (rule-based baseline →
-classical ML → LLM/hybrid, compared on accuracy/cost/latency), duplicate
-detection (writes `Transaction.duplicate_of_id`, which analytics already
-exclude), recurring-payment detection (unlocks the missing "recurring
-totals"), and anomaly detection. It needs labeled data to evaluate
-against, which the project doesn't have yet — expect that to be the first
-real decision of the phase.
+**Phase 6 — Forecasting**: a baseline statistical cash-flow forecast first, then an ML forecast
+benchmarked against it. It can use Phase 5's recurring series for the known obligations. Before it,
+consider the Phase 5 follow-ups above (retraining on user corrections; running the LLM and
+public-dataset checks with a key / network access).
