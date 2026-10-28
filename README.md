@@ -9,9 +9,9 @@ document and page.
 **Status: Phases 0–5 of 13 complete.** This README describes what's
 actually built and running today, not the end-state design — for the
 full 13-phase target architecture and design rationale, see
-[`personal_finance_llm.md`](./personal_finance_llm.md). For the
+[`personal_finance_llm.md`](./docs/personal_finance_llm.md). For the
 phase-by-phase build history, decisions, and open gaps in full detail,
-see [`PROGRESS_TRACKER.md`](./PROGRESS_TRACKER.md) — this README is a
+see [`PROGRESS_TRACKER.md`](./docs/PROGRESS_TRACKER.md) — this README is a
 snapshot; that file is the source of truth.
 
 ---
@@ -95,27 +95,31 @@ understanding (later phases). Phases 0–5 contain zero LLM calls in the running
 
 ```
 personal_finance_llm/
-├── personal_finance_llm.md   # Full 13-phase project spec / design doc
-├── BUILD_LOOP.md              # The research→implement→test→track→deliver loop this project follows
-├── PROGRESS_TRACKER.md        # Full decision log, known gaps, session-by-session history
+├── docs/
+│   ├── personal_finance_llm.md   # Full 13-phase project spec / design doc
+│   ├── BUILD_LOOP.md              # The research→implement→test→track→deliver loop this project follows
+│   ├── PROGRESS_TRACKER.md        # Full decision log, known gaps, session-by-session history
+│   └── master_prompt.md
 ├── docker-compose.yml         # db (Postgres+pgvector), cache (Valkey), seaweedfs, backend, worker, frontend
 ├── .env.example
 │
 ├── backend/
 │   ├── README.md                          # backend deep-dive: analytics definitions, testing, Phase 4 gaps
 │   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── requirements-dev.txt               # pytest + httpx
+│   ├── requirements.txt                   # human-edited input
+│   ├── requirements.lock.txt              # pinned prod freeze; Docker installs this
+│   ├── requirements-dev.txt               # lock + pytest + httpx
 │   ├── pytest.ini
 │   ├── docs/ml_eval/                      # Phase 5 evaluation report (report.md / report.json), regenerate: python -m app.ml.eval
-│   ├── tests/                             # 143 real-Postgres tests (Phase 4: 60; Phase 5: pure-algorithm units + DB/HTTP integration)
+│   ├── tests/                             # 147 real-Postgres tests (Phase 4: 60; Phase 5: 83; pre-Phase 6 hardening: 4)
 │   ├── alembic/
 │   │   └── versions/
 │   │       ├── 0001_initial_schema.py     # users, accounts, categories, documents, transactions
 │   │       ├── 0002_document_pages.py     # DocumentPage + provenance fields (Phase 2)
 │   │       ├── 0003_normalization.py      # normalization_status fields, merchant_aliases + seed data (Phase 3)
 │   │       ├── 0004_analytics_budgets.py  # budgets, category uniqueness fix, 10 system categories (Phase 4)
-│   │       └── 0005_ml_layer.py           # recurring_series, category/duplicate/anomaly provenance columns + indexes (Phase 5)
+│   │       ├── 0005_ml_layer.py           # recurring_series, category/duplicate/anomaly provenance columns + indexes (Phase 5)
+│   │       └── 0006_merchant_alias_uniqueness.py  # MerchantAlias NULLS NOT DISTINCT scope fix
 │   └── app/
 │       ├── main.py                        # FastAPI app, router registration, /health
 │       ├── core/
@@ -243,7 +247,7 @@ POST   /documents/{id}/normalize       manually (re-)trigger Phase 3 normalizati
 GET    /transactions                   ?account_id&date_from&date_to&is_anomaly&is_recurring&limit&offset
 GET    /transactions/{id}
 PATCH  /transactions/{id}              {category_id | null}  — assign / clear (final: ML never overrides)
-POST   /transactions/{id}/suggestion/accept | reject     Phase 5 — act on a category suggestion
+POST   /transactions/{id}/suggestion/accept | reject | undismiss   Phase 5 — act on a category suggestion
 POST   /transactions/{id}/duplicate/confirm | dismiss    Phase 5 — act on a duplicate candidate
 
 POST   /ml/run                         {force_reclassify?} duplicates→categories→recurring→anomalies (synchronous)
@@ -444,7 +448,7 @@ build sandbox).
 Every phase is tested against real infrastructure — real Postgres, real
 SeaweedFS, a real Celery worker on a real broker, real HTTP requests —
 never mocks. From Phase 4 on, the Postgres-backed tests are a committed
-pytest suite (`backend/tests/`, 143 tests; run instructions in
+pytest suite (`backend/tests/`, 147 tests; run instructions in
 `backend/README.md`) rather than throwaway scripts; earlier phases'
 SeaweedFS / Celery / OCR checks were run ad hoc and are *not* part of that
 suite. Where the sandbox used for development lacks a service

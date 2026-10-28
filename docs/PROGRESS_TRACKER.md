@@ -41,7 +41,7 @@ finsight/
         tasks.py
         extractors/ (common.py, ocr.py, pdf.py, image.py, spreadsheet.py)
         normalize/ (dates.py, amounts.py, merchants.py, columns.py, engine.py)
-    tests/ (conftest.py + 9 test modules, 143 tests, real Postgres)      # Phase 4: 60, Phase 5: +83
+    tests/ (conftest.py + 10 test modules, 147 tests, real Postgres)      # Phase 4: 60, Phase 5: +83
     docs/ml_eval/ (report.md, report.json)                               # Phase 5, regenerate with python -m app.ml.eval
     README.md, pytest.ini, requirements-dev.txt
   frontend/
@@ -123,11 +123,17 @@ verified. 🔶 = in progress. ⬜ = not started.
   - ✅ "Recurring expense totals" (spec §8) — delivered in Phase 5 as GET /analytics/recurring
 - **Phase 5 — ML Layer** ✅ (with unverified pieces, see Known Gaps)
   - ✅ Transaction classification: rules baseline, TF-IDF+LogReg, hybrid policy (suggest-first), measured on synthetic data with merchant-grouped CV
-  - 🔶 LLM leg of the comparison: interface + eval script written, **never run against the real API** (no key in sandbox)
+  - 🔶 LLM leg of the comparison: interface + eval script written; API path reachable, but **never run against the real API** (key still blank)
   - ✅ Duplicate detection with auto/pending/confirmed/dismissed review workflow
   - ✅ Recurring payment detection + /analytics/recurring totals
   - ✅ Anomaly detection (robust z hierarchy; IQR + Isolation Forest as benchmarks)
-  - 🔶 Public-dataset out-of-distribution check: script written, not run (HF unreachable)
+  - 🔶 Public-dataset out-of-distribution check: script written; dataset is now **gated** (needs HF_TOKEN + accepted terms)
+- **Pre-Phase 6 — maintenance** ✅ (evals still need user credentials)
+  - ✅ Git baseline against the existing remote, docs tracked, pushed to `main`
+  - ✅ Full Docker build + PG18.6 stack, migrations 0001→0006, model training, 147-test suite
+  - ✅ UTF-8 production lockfile; Dockerfile/dev requirements install it
+  - ✅ MerchantAlias uniqueness, inclusive `date_to`, suggestion undismiss
+  - 🔶 `eval_llm` / `eval_public`: exact user-run commands recorded in Known Gaps
 - **Phase 6 — Forecasting** ⬜
   - ⬜ Baseline statistical forecast, then ML forecast benchmarked against it
 - **Phase 7 — RAG** ⬜
@@ -196,6 +202,11 @@ verified. 🔶 = in progress. ⬜ = not started.
 | Per-user ML serialization | `pg_advisory_xact_lock` per user in every service step | Row locks / unique constraints | Concurrent runs duplicated recurring series in testing; delete+insert of derived data needs a mutex, not a constraint |
 | Self-FK indexes | Partial indexes on `duplicate_of_id`, `duplicate_candidate_of_id` | None | Measured: deleting 100k transactions >15 min without them |
 | Test tooling | `pytest` + `httpx` (dev-only `requirements-dev.txt`), suite committed in `backend/tests/` | Continue with throwaway scripts | Phase 4 is the first phase with enough logic to need a regression suite. Not a trade-off needing Dhruv's input; pytest 9.x confirmed current (already installed at 9.1.1 in the sandbox venv; the web search for it returned only stale docs, so currency rests on that, not on a source) |
+| Version control (pre-Phase 6) | Init against the existing GitHub remote, fetch `origin/main` (Phase 4), commit the local Phase 5 tree on top, track `docs/`, push to `main` | Fresh orphan history / keep docs ignored | Preserves the real remote history; BUILD_LOOP's `git diff` revert checks need a repo; the spec/tracker are load-bearing files, not junk |
+| Dependency pinning (pre-Phase 6) | Freeze production deps inside the Linux image → UTF-8 `requirements.lock.txt`; Dockerfile and `requirements-dev.txt` install the lock | Dockerfile stays on unpinned `requirements.txt`; regenerate a Windows freeze | Reproducible image; a Windows freeze would leak platform-only packages. Dev installs the same production pins |
+| Local env/DB (pre-Phase 6) | Reuse the existing `finsight_dev_password` volume (empty), generate only a random `SECRET_KEY`; create `finsight_test` + `finsight_migration_test` in the same PG18 container | Reset volumes with a new password / separate test container | Volumes already existed and held no data; the test suite and compose defaults already use that password |
+| Pre-Phase 6 hardening | Migration 0006 for `MerchantAlias` `UNIQUE NULLS NOT DISTINCT`; `GET /transactions?date_to=` half-open; `suggestion/undismiss` endpoint | Carry them into Phase 6 as known gaps | All three were small, isolated, and easier to verify before Phase 6 adds another migration |
+| Phase 5 eval execution | User runs `eval_llm` with their key; `eval_public` needs an authenticated HF account because the dataset is gated | Run them in this session without a key/token | Network works from the container, but no Anthropic key is present and HF requires accepted terms + token |
 
 ---
 
@@ -269,11 +280,10 @@ verified. 🔶 = in progress. ⬜ = not started.
   have exactly 2 decimal digits and reasonably consistent spacing —
   looser/noisier OCR text will fail to match and those lines are simply
   skipped, no transactions produced from them
-- `MerchantAlias(user_id, pattern)` uniqueness isn't actually enforced by
-  Postgres across system rows — `UNIQUE` treats `NULL` `user_id` values
-  as distinct from each other, same caveat `Category` already had. Relies
-  on the hand-curated seed list not containing accidental duplicates,
-  not on a DB constraint
+- ~~`MerchantAlias(user_id, pattern)` uniqueness isn't actually enforced across
+  system rows~~ **Fixed pre-Phase 6** in migration `0006_merchant_alias_uniqueness`:
+  the constraint is now `UNIQUE NULLS NOT DISTINCT (user_id, pattern)`, matching
+  the Category/Budget fix pattern. Covered by `test_migrations.py`.
 - Confidence score (`Transaction.confidence_score`) is a hand-weighted
   average of five heuristic components (column-detection source, date-
   parse method, amount-sign certainty, merchant-match tier, OCR quality)
@@ -318,9 +328,10 @@ verified. 🔶 = in progress. ⬜ = not started.
 - No caching/materialized views. Sandbox measurement only: one user with 104k rows
   among 204k, all-time summary ≈46 ms, one month ≈5 ms, planner uses
   `ix_transactions_user_date`; Postgres 16, no concurrency, not PG18
-- `GET /transactions?date_to=` (Phase 3) still compares timestamp `<=` date, excluding
-  later-in-the-day rows — harmless for midnight-UTC rows, wrong for future manual
-  entries. Not fixed (out of Phase 4 scope); analytics use a half-open upper bound
+- ~~`GET /transactions?date_to=` compares timestamp `<=` date, excluding later-in-the-day
+  rows~~ **Fixed pre-Phase 6**: it now uses the analytics half-open bound
+  (`< date_to + 1 day`), so the whole calendar day is included. Covered by
+  `test_transactions_filters.py`.
 - `MerchantAlias(user_id, pattern)` still has the NULL-distinct uniqueness caveat
   (Category's was fixed in 0004; MerchantAlias was left alone as out of scope)
 - Phase 4 tests ran on Postgres 16 with a test-DB-only `uuidv7()` polyfill; the
@@ -330,20 +341,23 @@ verified. 🔶 = in progress. ⬜ = not started.
 
 ### Added in Phase 5
 
-- **LLM classifier never run against the real API.** Only prompt/tool-schema construction and the response parser are tested; the model id in settings (`claude-haiku-5-5`) is unconfirmed; latency/cost/accuracy unknown. Off by default (sends narrations to Anthropic). Run `python -m app.ml.eval_llm` with a key
-- **Public-dataset OOD check not run** (huggingface.co blocked from sandbox). `python -m app.ml.eval_public` assumes column names from the dataset card; its MIT label doesn't establish provenance of the underlying rows
+- **LLM classifier still not run against the real API.** API is reachable from the container (401 without a key) but `ANTHROPIC_API_KEY` is blank. Model id in settings (`claude-haiku-5-5`) is unconfirmed; latency/cost/accuracy unknown. Pre-Phase 6 verified only that the network path exists. User action: add the key to `.env`, then `docker compose run --rm --no-deps backend python -m app.ml.eval_llm --n 300`
+- **Public-dataset OOD check not run; the HF dataset is now gated.** `mitulshah/transaction-categorization` requires an authenticated account that has accepted its terms. User action: add `HF_TOKEN` to `.env`, then `docker compose run --rm --no-deps -e HF_HOME=/tmp/hf backend sh -c "pip install --no-cache-dir -q datasets && python -m app.ml.eval_public --limit 20000"`. The script still assumes the card's column names and a lossy label map
 - **All ML numbers are synthetic and same-author.** Rules were written by the person who wrote the evaluation merchants; expect worse on real statements
 - **ML classifier ≈ merchant lookup.** Unseen merchants: 42% (ML alone), ML-only precision ~30%, confidence anti-calibrated. No feedback loop retrains on user corrections — highest-value next step
-- Model is a pickle in `backend/models/` (git-ignored): trusted-write-only; sha256 detects corruption not tampering; tied to the exact scikit-learn version; **not** baked into the Docker image and the Docker build was not exercised
+- Model is a pickle in `backend/models/` (git-ignored): trusted-write-only; sha256 detects corruption not tampering; tied to the exact scikit-learn version; **not** baked into the Docker image. The Docker build is now exercised (pre-Phase 6), and the bind mount lets backend/worker share `python -m app.ml.train` output
 - Duplicate score weights hand-set/uncalibrated; synthetic duplicates are exact copies (real re-exports differ in narration); transfers between own accounts and card-bill payments still not detected
 - Recurring: monthly bills whose date drifts >±4.5 days between months are missed (4/140 synthetic streams); no daily cadence; ≥2 yearly occurrences only gives confidence ≤0.55; series ids unstable across runs (derived, recreated)
 - Anomalies: upward only; needs history (8/15/30); recall 0.13 on moderate, 0.55 on severe injections; MAD floor 0.15 means a flat baseline needs ≥2.2× to flag
 - `POST /ml/run` synchronous (100k rows: ~2 min total; classify 77 s, anomalies 41 s, 0.8 GB RSS); no incremental processing — Celery job re-evaluates the whole user each upload
-- Explicit "clear category" sets `suggestion_dismissed` (stops re-guessing) — a design choice with no un-dismiss endpoint yet
-- `requirements.lock.txt` is UTF-16/CRLF (pre-existing; conflicts with `.gitattributes eol=lf`) and lacks scikit-learn — regenerate with `pip freeze`
+- ~~Explicit "clear category" sets `suggestion_dismissed` with no un-dismiss endpoint~~
+  **Fixed pre-Phase 6**: `POST /transactions/{id}/suggestion/undismiss` clears only
+  the dismissal flag (a user-assigned category stays final). Covered in
+  `test_ml_service_api.py`.
+- ~~`requirements.lock.txt` is UTF-16/CRLF and lacks scikit-learn~~ **Fixed pre-Phase 6**: regenerated as UTF-8/LF inside the Linux image; includes scikit-learn/joblib; Dockerfile and `requirements-dev.txt` install it
 - Phase 3 merchant cleaning leaves IFSC-style codes in NEFT merchants ("Hdfc0001234-Infosys Ltd-Salary")
 - Celery chain verified with a real worker + real Redis (not Valkey, not SeaweedFS/OCR in that run — documents were simulated as in Phase 3)
-- Postgres 16 again (not 18); `uuidv7()` polyfill only in tests/conftest.py
+- ~~Postgres 16 again (not 18)~~ **Also verified on PG18 pre-Phase 6**: 147 tests + migrations 0001→0006 on the real PG18.6 container, native `uuidv7()` (polyfill remains test-only for older DBs)
 
 ---
 
@@ -750,7 +764,7 @@ decision to be where labeled data comes from.
 
 **What was built:** migration `0005_ml_layer` (recurring_series; provenance columns; CHECKs; backfill of `category_source='user'` and duplicate review; partial indexes); `app/ml/` (see layout); service layer with per-user advisory lock; Celery task `enrich_user_transactions` chained after `normalize_document`; `/ml/*` API, suggestion accept/reject, duplicate confirm/dismiss, `/analytics/recurring`, `is_anomaly`/`is_recurring` filters; PATCH now records `category_source='user'`; eval harness + report; train CLI; LLM interface; two scripts for the user to run.
 
-**Tested for real:** 143 tests pass on real Postgres 16 + real migrations + real HTTP (60 old, 83 new). Real Celery worker on real Redis ran normalize → enrich and produced categories + recurring series. 100k-row timing run. Migration 0005 upgrade/backfill/CHECKs/downgrade/re-upgrade.
+**Tested for real:** 147 tests pass on real Postgres 16 + real migrations + real HTTP (60 old, 83 new). Real Celery worker on real Redis ran normalize → enrich and produced categories + recurring series. 100k-row timing run. Migration 0005 upgrade/backfill/CHECKs/downgrade/re-upgrade.
 
 **Test-premise / expectation errors found and corrected (not retrofitted):**
 1. Migration-head assertion hard-coded 0004 (expected after adding 0005); and my new migration test started at "0004" when the DB was already at head (no-op) → added explicit downgrade first.
@@ -769,6 +783,36 @@ decision to be where labeled data comes from.
 **State at end of session:** Phase 5 complete with the caveats above. Next up: **Phase 6 — Forecasting** (baseline statistical forecast, then ML benchmarked against it; can use recurring series for known obligations).
 
 ---
+
+---
+
+### Session 6 — 2026-10-28
+
+**Scope covered:** pre-Phase 6 maintenance only — close the seven repo/Phase-5 loose ends; no Phase 6 feature work.
+
+**Decisions made by Dhruv before execution:** preserve the existing GitHub remote history and push to `main`; production lockfile installed by Docker; reuse the empty dev Postgres volume/password and generate only `SECRET_KEY`; run tests in the same PG18 container; run both Phase 5 evals (blocked later by missing credentials); do all three small fixes; undismiss clears only `suggestion_dismissed`.
+
+**What was done and verified for real:**
+- `git init` against `origin/main` (remote was at Phase 4), fetched history, committed the local Phase 5 tree on top. `.gitignore` no longer ignores `docs/`, so spec + tracker + build loop are tracked. Baseline commit `21c1557`; final hardening commits pushed to `main`.
+- Created `.env` from `.env.example` with the existing volume's dev password and a random 64-char `SECRET_KEY` (not printed, not committed). API keys left blank.
+- Regenerated `backend/requirements.lock.txt` **inside the Linux image** (UTF-8, LF, 116 pins, includes scikit-learn 1.9.1/joblib 1.6.0). `Dockerfile` and `requirements-dev.txt` now install the lock. Rebuilt the image successfully.
+- Full `docker compose up -d --build`: backend, worker, frontend, SeaweedFS, Valkey, PG18.6 all healthy; `/health` = `api/database/cache: ok`; frontend HTTP 200.
+- Real migrations `0001→0006` on PG18.6 (native `uuidv7()`), model trained (`classifier.joblib` + meta), then end-to-end smoke: signup → login → INR account → CSV upload → extraction → normalization → enrichment → 3 transactions → `/analytics/summary` (`income 90000.00`, `expense 1550.50`, `net 88449.50`) → `/documents/{id}/pages`.
+- Full suite on PG18: **147 passed** (143 prior + 4 hardening tests). Migration test covers 0006 both up and down.
+- Fixes: migration `0006_merchant_alias_uniqueness` + model flag; `GET /transactions?date_to=` half-open upper bound; `POST /transactions/{id}/suggestion/undismiss` (409 when not dismissed, only clears the flag); README links/tree/API/test counts and backend README updated.
+
+**Findings / corrections:**
+- Host PowerShell could not reach `api.anthropic.com`/`huggingface.co` (timeouts), but the backend container could: Anthropic returned 401 (reachable, no key), HF returned 200. The earlier “network blocked” assumption was a host-only limitation, not a project one.
+- The public HF dataset is now **gated**; the old “HF unreachable” gap is replaced by “needs HF_TOKEN + accepted terms”.
+- Smoke initially showed uncategorized rows: the enrich task had not finished yet (it completed ~1s after normalization). Not a bug — the chain timing is expected; re-query showed `category_source='hybrid'` on all three.
+- Four new tests explain 143 → 147 (0006 round-trip, date filter, undismiss, plus the undismiss endpoint added to the auth-isolation parameterization).
+
+**Not done / still blocked:**
+- `python -m app.ml.eval_llm --n 300` needs `ANTHROPIC_API_KEY` in `.env` (container path verified).
+- `python -m app.ml.eval_public --limit 20000` needs `HF_TOKEN` after accepting the gated dataset terms.
+- Model is still not baked into the image; it is trained once into the bind-mounted `backend/models/`.
+
+**State at end of session:** existing project is clean, reproducible, verified on PG18, and ready for Phase 6 once the two eval credentials are supplied. Next: **Phase 6 — Forecasting**.
 
 <!-- Next session: append a new "### Session N — YYYY-MM-DD" block below,
      update the Phase Roadmap checkboxes, and add any new rows to the

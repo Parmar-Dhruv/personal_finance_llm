@@ -179,7 +179,7 @@ Every step is idempotent, user-scoped, and serialized per user by a Postgres adv
 - Label set = the ten system categories from migration 0004. A debit can never be `Salary` (hard mask, applies to rules, ML and the LLM parser).
 - **Policy.** `rule` or `hybrid` (rule and ML agree) predictions → auto-applied (`category_source` = rule/hybrid). `ml`-only → suggestion only (`suggested_category_*`), because the measured ML-only precision on unseen merchants is ~30% and its confidence is not calibrated. The auto threshold for ML-only lives in the model metadata (`ml_only_auto_apply_threshold`); it is currently `null` = never. Below 0.5 → no prediction.
 - A confident ML disagreement (≥0.95) overrides a rule; otherwise the rule wins.
-- **Provenance rules.** `category_source='user'` is final (PATCH, accepting a suggestion). A category with no recorded source is treated as the user's. Rejecting a suggestion or clearing a category sets `suggestion_dismissed`, which even `force_reclassify` respects. `force_reclassify` re-evaluates only earlier machine decisions and clears ones the current model no longer backs.
+- **Provenance rules.** `category_source='user'` is final (PATCH, accepting a suggestion). A category with no recorded source is treated as the user's. Rejecting a suggestion or clearing a category sets `suggestion_dismissed`, which even `force_reclassify` respects; `POST /transactions/{id}/suggestion/undismiss` clears only that flag so suggestions may resume (a user-set category stays final). `force_reclassify` re-evaluates only earlier machine decisions and clears ones the current model no longer backs.
 - **Model lifecycle.** `python -m app.ml.train` → synthetic data → `models/classifier.joblib` + `.meta.json` (sha256, sklearn version, metrics). If the file is missing, corrupt, or from a different scikit-learn version, the system degrades to **rules-only** and says so in `GET /ml/status` instead of failing. Pickle caveat: trusted-write directory only.
 - **Training data is synthetic** (`ml/synthetic.py`, ~240 merchants, Indian-bank-style narrations). Evaluation holds out whole merchants.
 
@@ -210,7 +210,7 @@ The 0.15 floor means a flat baseline needs a ≥2.2× jump to flag.
 4. Deleting a user with 100k transactions took >15 min: unindexed self-referencing FKs (`duplicate_of_id`, new `duplicate_candidate_of_id`). Partial indexes added in 0005.
 
 ### Phase 5 tests
-83 new tests: `tests/test_ml_units.py` (pure algorithms: rule ordering, Salary-credit constraint, hybrid override, persistence failure modes,
+87 new tests (83 Phase 5 + 4 pre-Phase 6 hardening): `tests/test_ml_units.py` (pure algorithms: rule ordering, Salary-credit constraint, hybrid override, persistence failure modes,
 cadences, price rise, skipped month, chance clusters, duplicate thresholds/refs/habits/triplicates, anomaly floors/fallbacks/currency separation, LLM parser abuse cases),
 `tests/test_ml_service_api.py` (real Postgres + HTTP: auto vs suggest, user-final, reject-sticks, force semantics, duplicates through analytics, human decisions surviving re-runs,
 exact recurring totals, concurrent runs, cross-user isolation, 401s, the Celery task body) and the 0005 backfill/constraint/round-trip test. Verified separately (not in the suite):
@@ -262,10 +262,9 @@ list across all phases is in `PROGRESS_TRACKER.md` §5.
   larger scale.
 - Breakdown/merchant endpoints return all matching groups unless `limit` is given.
 
-**Inherited, not changed in Phase 4** — `GET /transactions?date_to=` still compares
-a timestamp to a date with `<=` (excludes later-in-the-day rows; harmless while
-every row is midnight UTC, wrong for any future manual entry with a time); and the
-other gaps listed in the root README.
+**Fixed pre-Phase 6** — `GET /transactions?date_to=` now uses the same half-open
+upper bound as analytics (`< date_to + 1 day`), so the whole calendar day is
+included even for rows that carry a time. Other gaps are listed in the root README.
 
 ---
 
@@ -298,7 +297,7 @@ export TEST_DATABASE_URL=postgresql+psycopg://finsight:finsight_dev_password@loc
 pytest
 ```
 
-What's covered (Phase 4 portion, 60 of 143 tests; Phase 5 coverage is described above): exact-decimal sums (1000 × 0.10 = 100.00); currency
+What's covered (Phase 4 portion, 60 of 147 tests; Phase 5 coverage is described above): exact-decimal sums (1000 × 0.10 = 100.00); currency
 separation; inclusive date boundaries, month/year/leap-day edges; gap-filled
 monthly series and partial flags; zero-denominator percentages; duplicate
 exclusion; category/merchant/account breakdowns incl. ties and `limit`; budget
