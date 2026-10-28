@@ -1,5 +1,5 @@
 # Test-only dependencies (not installed in the production image).
--r requirements.txt
+-r requirements.lock.txt
 pytest
 # fastapi.testclient needs httpx
 httpx

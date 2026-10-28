@@ -1,6 +1,7 @@
 # Versions intentionally left unpinned to exact patch numbers for this scaffold.
-# Run `pip freeze > requirements.lock.txt` after first successful install and
-# commit the lockfile — don't trust any version numbers here as verified.
+# This file is the human-edited input; the Docker image installs the pinned
+# requirements.lock.txt (regenerate inside the Linux image with
+# `pip freeze > requirements.lock.txt`). Don't trust version numbers here as verified.
 
 fastapi
 uvicorn[standard]
