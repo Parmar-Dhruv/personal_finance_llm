@@ -1,20 +1,27 @@
 """
-Out-of-distribution check on a PUBLIC dataset -- NOT RUN in the build sandbox
-(huggingface.co is not reachable from it). Run locally:
+Out-of-distribution check on a PUBLIC dataset. Requires an HF account that has
+accepted the gated dataset terms and an `HF_TOKEN`:
 
-    pip install datasets
-    python -m app.ml.eval_public --limit 20000
+    docker compose run --rm --no-deps -e HF_HOME=/tmp/hf backend sh -c \
+      "pip install --no-cache-dir -q datasets && python -m app.ml.eval_public --limit 20000"
 
 Dataset: huggingface.co/datasets/mitulshah/transaction-categorization
 (labelled MIT; the card says it mixes synthetic records with data from
 unnamed external sources, so the MIT label does not by itself settle
 provenance -- review before redistributing anything derived from it).
 
-Its 10 categories don't match ours, so labels are MAPPED, lossily, and rows
-whose category has no counterpart are dropped (see MAP). Treat the result as a
-rough out-of-distribution signal on generic US/UK/IN narrations, not a
-benchmark. The column names below are assumptions from the dataset card; if the
-schema differs the script fails loudly rather than guessing.
+Latest run (2026-10-28): 12,144 of the first 20,000 rows mapped (60.7%); among
+mapped rows, 48.9% answered, 48.6% precision on answered, 23.8% accuracy with
+abstentions counted wrong. See `docs/ml_eval/public_ood.json`.
+
+Caveats that limit interpretation: the split is a first-N slice, not a random
+sample; every row is forced to debit/amount 100.0/merchant None because the
+public schema has no equivalent fields here; and four categories (Financial
+Services, Income, Government & Legal, Charity & Donations) have no counterpart
+and are dropped (see MAP). Treat the result as a rough signal on generic
+US/UK/IN narrations, not a benchmark. The column names below are assumptions
+from the dataset card; if the schema differs the script fails loudly rather than
+guessing.
 """
 
 from __future__ import annotations

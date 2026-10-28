@@ -127,7 +127,7 @@ verified. 🔶 = in progress. ⬜ = not started.
   - ✅ Duplicate detection with auto/pending/confirmed/dismissed review workflow
   - ✅ Recurring payment detection + /analytics/recurring totals
   - ✅ Anomaly detection (robust z hierarchy; IQR + Isolation Forest as benchmarks)
-  - ✅ Public-dataset out-of-distribution check: 12,144 mapped rows, coverage 48.9%, precision-on-answered 48.6% (`docs/ml_eval/public_ood.json`); lossy label map, signal only
+  - ✅ Public-dataset out-of-distribution check: 12,144 of 20,000 requested rows mapped (60.7%); 48.9% answer coverage on mapped rows, 48.6% precision-on-answered, 23.8% abstain-as-wrong (`docs/ml_eval/public_ood.json`); lossy label map, signal only
 - **Pre-Phase 6 — maintenance** ✅
   - ✅ Git baseline against the existing remote, docs tracked, pushed to `main`
   - ✅ Full Docker build + PG18.6 stack, migrations 0001→0006, model training, 151-test suite
@@ -191,8 +191,8 @@ verified. 🔶 = in progress. ⬜ = not started.
 | "Spent" definition for budgets | Gross debits in the budget's currency in the calendar month, excluding flagged duplicates; refunds not netted | Net of refunds | Simplest unambiguous definition; refunds need Phase 5 context to attribute to the right category. Logged as a gap |
 | Month bucketing | UTC calendar months | User-timezone months | Phase 3 stores dates as midnight-UTC calendar dates, so UTC is exactly right for stored data; a user timezone would only matter for the "current month" default |
 | Money in API JSON | `Decimal` → string | float | Same reasoning as `Numeric` storage; clients can't lose cents |
-| Phase 5 labeled data | Own seeded synthetic generator for training + merchant-grouped CV; separate OOD check on the public HF dataset | Public HF dataset (mitulshah/transaction-categorization) as the training source | Dhruv's call ("both, separately"). HF dataset is MIT-labelled but mixes synthetic and unnamed external sources, and its categories don't match ours. The OOD check could not run (HF blocked in sandbox) → script only. **Update (Session 6):** run with an HF token on 12,144 mapped rows; signal only, not a benchmark |
-| Phase 5 LLM classifier | Interface + eval script, off by default, real eval deferred | Run it now; defer to Phase 8 | Dhruv's call (recommended). No API key in sandbox; BUILD_LOOP forbids counting unverified work as done. **Update (Session 6):** Gemini adapter added and run; Anthropic still unverified |
+| Phase 5 labeled data | Own seeded synthetic generator for training + merchant-grouped CV; separate OOD check on the public HF dataset | Public HF dataset (mitulshah/transaction-categorization) as the training source | Dhruv's call ("both, separately"). HF dataset is MIT-labelled but mixes synthetic and unnamed external sources, and its categories don't match ours. The build sandbox could not reach HF, so Phase 5 shipped the script only. **Session 6:** ran with an HF token on 12,144 mapped of 20,000 requested rows; signal only, not a benchmark |
+| Phase 5 LLM classifier | Interface + eval script, off by default, real eval deferred | Run it now; defer to Phase 8 | Dhruv's call (recommended). No provider key in the build sandbox; BUILD_LOOP forbids counting unverified work as done. **Session 6:** Gemini adapter added and run; Anthropic still unverified |
 | Phase 5 auto-apply policy | Suggest-first: rule/hybrid auto-apply, ML-only suggestions; never overwrite user categories; duplicates auto only at ≥0.95 | Always write category_id; never auto-apply anything | Dhruv's call (recommended). Evaluation then showed why it matters: ML-only precision on unseen merchants is ~30% with anti-calibrated confidence, so the ML-only auto threshold is `null` (never) |
 | Phase 5 scope | All four components in one phase | Split into 5a/5b | Dhruv's call |
 | Anomaly method | Robust z-score (median/MAD, log amount), hierarchical baseline | Isolation Forest; IQR | **My call, not surfaced** (judged low-stakes): PR-AUC on injected synthetic anomalies robust-z 0.63 ≈ IQR 0.64 ≫ IF 0.36, and z-scores are explainable (`anomaly_detail`). IQR is equally good here; z chosen for the conventional 3.5 cutoff |
@@ -332,8 +332,10 @@ verified. 🔶 = in progress. ⬜ = not started.
   rows~~ **Fixed pre-Phase 6**: it now uses the analytics half-open bound
   (`< date_to + 1 day`), so the whole calendar day is included. Covered by
   `test_transactions_filters.py`.
-- `MerchantAlias(user_id, pattern)` still has the NULL-distinct uniqueness caveat
-  (Category's was fixed in 0004; MerchantAlias was left alone as out of scope)
+- ~~`MerchantAlias(user_id, pattern)` still has the NULL-distinct uniqueness caveat~~
+  **Fixed pre-Phase 6** in migration `0006_merchant_alias_uniqueness` with
+  `UNIQUE NULLS NOT DISTINCT (user_id, pattern)`. The upgrade assumes no existing
+  duplicate system aliases; it does not dedupe first.
 - Phase 4 tests ran on Postgres 16 with a test-DB-only `uuidv7()` polyfill; the
   Celery/Valkey/SeaweedFS/OCR chain was not re-run end-to-end this session
   (normalization engine was exercised in-process, not via a worker)
@@ -341,9 +343,9 @@ verified. 🔶 = in progress. ⬜ = not started.
 
 ### Added in Phase 5
 
-- **Anthropic LLM path still unverified; Gemini verified.** `gemini-3.5-flash-lite` completed n=300 against the real API (94.3% vs hybrid 91.3%, synthetic holdout; 0 abstentions). The Anthropic model id (`claude-haiku-5-5`) remains a guess. Both adapters are off by default; `LLM_PROVIDER` selects one. Reproduce: `docker compose run --rm --no-deps backend python -m app.ml.eval_llm --n 300`.
+- **Anthropic LLM path still unverified; Gemini verified.** `gemini-3.5-flash-lite` completed n=300 against the real API (94.3% vs hybrid 91.3% on a separate synthetic holdout; 0 abstentions). The 0-abstention result reflects the fixed `LLM_CONFIDENCE=0.80`, not calibration. The Anthropic model id (`claude-haiku-5-5`) remains a guess. Both adapters exist but nothing in the pipeline calls them yet; `LLM_CLASSIFIER_ENABLED` only controls the `/ml/status` report, and `LLM_PROVIDER` selects the adapter for direct/eval use. Reproduce: `docker compose run --rm --no-deps backend python -m app.ml.eval_llm --n 300 --provider gemini --model gemini-3.5-flash-lite`.
 - **Gemini free tier limits the eval.** 20 requests/model/day; n=300 uses 12. `gemini-2.5-flash` is closed to new keys; 3.8/3.5 Flash returned 503s, so Flash-Lite was used. The adapter retries 429/5xx four times with backoff; 60 s request timeout.
-- **Public OOD check run, but not a benchmark.** 12,144 of 20,000 rows mapped (48.9% coverage), 48.6% precision on answered, 23.8% accuracy counting abstentions as wrong (`docs/ml_eval/public_ood.json`). The dataset's categories do not match this project's ten; the map is lossy and its MIT label does not settle provenance.
+- **Public OOD check run, but not a benchmark.** 12,144 of 20,000 requested rows mapped (60.7%); among mapped rows, 48.9% answered, 48.6% precision on answered, 23.8% accuracy counting abstentions as wrong (`docs/ml_eval/public_ood.json`). The dataset's categories do not match this project's ten; the map is lossy and its MIT label does not settle provenance.
 - **All ML numbers are synthetic and same-author.** Rules were written by the person who wrote the evaluation merchants; expect worse on real statements
 - **ML classifier ≈ merchant lookup.** Unseen merchants: 42% (ML alone), ML-only precision ~30%, confidence anti-calibrated. No feedback loop retrains on user corrections — highest-value next step
 - Model is a pickle in `backend/models/` (git-ignored): trusted-write-only; sha256 detects corruption not tampering; tied to the exact scikit-learn version; **not** baked into the Docker image. The Docker build is now exercised (pre-Phase 6), and the bind mount lets backend/worker share `python -m app.ml.train` output
@@ -358,7 +360,7 @@ verified. 🔶 = in progress. ⬜ = not started.
 - ~~`requirements.lock.txt` is UTF-16/CRLF and lacks scikit-learn~~ **Fixed pre-Phase 6**: regenerated as UTF-8/LF inside the Linux image; includes scikit-learn/joblib; Dockerfile and `requirements-dev.txt` install it
 - Phase 3 merchant cleaning leaves IFSC-style codes in NEFT merchants ("Hdfc0001234-Infosys Ltd-Salary")
 - Celery chain verified with a real worker + real Redis (not Valkey, not SeaweedFS/OCR in that run — documents were simulated as in Phase 3)
-- ~~Postgres 16 again (not 18)~~ **Also verified on PG18 pre-Phase 6**: 147 tests + migrations 0001→0006 on the real PG18.6 container, native `uuidv7()` (polyfill remains test-only for older DBs)
+- ~~Postgres 16 again (not 18)~~ **Also verified on PG18 pre-Phase 6**: 151 tests + migrations 0001→0006 on the real PG18.6 container, native `uuidv7()` (polyfill remains test-only for older DBs)
 
 ---
 
@@ -765,7 +767,7 @@ decision to be where labeled data comes from.
 
 **What was built:** migration `0005_ml_layer` (recurring_series; provenance columns; CHECKs; backfill of `category_source='user'` and duplicate review; partial indexes); `app/ml/` (see layout); service layer with per-user advisory lock; Celery task `enrich_user_transactions` chained after `normalize_document`; `/ml/*` API, suggestion accept/reject, duplicate confirm/dismiss, `/analytics/recurring`, `is_anomaly`/`is_recurring` filters; PATCH now records `category_source='user'`; eval harness + report; train CLI; LLM interface; two scripts for the user to run.
 
-**Tested for real:** 147 tests pass on real Postgres 16 + real migrations + real HTTP (60 old, 83 new). Real Celery worker on real Redis ran normalize → enrich and produced categories + recurring series. 100k-row timing run. Migration 0005 upgrade/backfill/CHECKs/downgrade/re-upgrade.
+**Tested for real:** 147 tests pass on real Postgres 16 + real migrations + real HTTP (60 old, 83 new; Session 6 later made 151). Real Celery worker on real Redis ran normalize → enrich and produced categories + recurring series. 100k-row timing run. Migration 0005 upgrade/backfill/CHECKs/downgrade/re-upgrade.
 
 **Test-premise / expectation errors found and corrected (not retrofitted):**
 1. Migration-head assertion hard-coded 0004 (expected after adding 0005); and my new migration test started at "0004" when the DB was already at head (no-op) → added explicit downgrade first.
@@ -777,7 +779,7 @@ decision to be where labeled data comes from.
 
 **Sandbox substitutions & revert check:** PG16, `uuidv7()` polyfill only in tests/conftest.py (`*_test` DBs); Redis stood in for Valkey. Verified: `git diff` on migrations 0001–0004 empty; `gen_random_uuid` outside tests only in a pre-existing comment.
 
-**Not done / unverified:** see "Added in Phase 5" above — chiefly the LLM leg, the public-dataset check, and real-data accuracy.
+**Not done / unverified:** see "Added in Phase 5" above — chiefly the LLM leg, the public-dataset check, and real-data accuracy. **Session 6 superseded the first two:** Gemini ran and the OOD check ran; Anthropic and real-statement accuracy remain unverified.
 
 **Edge cases identified:** unseen merchants; Salary as a debit; employer names that look like shops (Flipkart Internet); refunds as credits; truncated/typo'd narrations; re-uploaded statements, ±1-day posting shifts, distinct bank refs, daily fares, triplicates; price rises, skipped months, interleaved subscriptions at one merchant, chance clusters, same-day rows; flat (zero-spread) baselines, tiny history, per-currency/direction baselines, duplicates polluting baselines; concurrent runs; user-set categories vs forced reclassification; dismissed suggestions; stale auto-flags after data changes; corrupt/old-version/missing model file; prompt-injected narrations (LLM path forced through an enum tool, output re-validated).
 
@@ -802,13 +804,13 @@ decision to be where labeled data comes from.
 - Full suite on PG18: **151 passed** (147 prior + 4 Gemini adapter/factory tests). Migration test covers 0006 both up and down.
 - Fixes: migration `0006_merchant_alias_uniqueness` + model flag; `GET /transactions?date_to=` half-open upper bound; `POST /transactions/{id}/suggestion/undismiss` (409 when not dismissed, only clears the flag); README links/tree/API/test counts and backend README updated.
 - Added `GeminiClassifier` + `get_llm_classifier()` and `--provider/--model` to `eval_llm`; Gemini uses the same validated JSON schema/parser as Anthropic, with bounded retries (429/5xx) and a 60 s timeout. `google-genai==2.33.0` pinned in the lock; `GEMINI_API_KEY`, `LLM_PROVIDER`, `LLM_GEMINI_MODEL` documented in `.env.example` (none committed).
-- Ran both evals for real: public OOD 12,144 rows (coverage 0.4888, precision-on-answered 0.4862, abstain-as-wrong 0.2376); Gemini 3.5 Flash-Lite n=300 on synthetic holdout (hybrid 0.9133, LLM 0.9433, 0 abstentions). Artifacts: `backend/docs/ml_eval/public_ood.json`, `llm_synthetic.json`.
+- Ran both evals for real: public OOD 12,144 mapped of 20,000 requested rows (60.7%); among mapped rows, answer coverage 0.4888, precision-on-answered 0.4862, abstain-as-wrong 0.2376; Gemini 3.5 Flash-Lite n=300 on a separate synthetic holdout (hybrid 0.9133, LLM 0.9433, 0 abstentions). Artifacts: `backend/docs/ml_eval/public_ood.json`, `llm_synthetic.json`.
 
 **Findings / corrections:**
 - Host PowerShell could not reach `api.anthropic.com`/`huggingface.co` (timeouts), but the backend container could: Anthropic returned 401 (reachable, no key), HF returned 200. The earlier “network blocked” assumption was a host-only limitation, not a project one.
 - The public HF dataset is now **gated**; the old “HF unreachable” gap is replaced by “needs HF_TOKEN + accepted terms”.
 - Smoke initially showed uncategorized rows: the enrich task had not finished yet (it completed ~1s after normalization). Not a bug — the chain timing is expected; re-query showed `category_source='hybrid'` on all three.
-- Four new tests explain 143 → 147 (0006 round-trip, date filter, undismiss, plus the undismiss endpoint added to the auth-isolation parameterization).
+- Four new tests explain 143 → 147 (0006 round-trip, date filter, undismiss, plus the undismiss endpoint added to the auth-isolation parameterization); the four Gemini tests later made 151.
 
 **Not done / still unverified:**
 - Anthropic path (`claude-haiku-5-5`) has never been called; only Gemini is verified.

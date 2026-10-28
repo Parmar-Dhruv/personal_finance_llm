@@ -33,8 +33,8 @@ extraction (Celery) → date/amount/merchant normalization (Celery,
 auto-chained) → queryable `Transaction` rows → deterministic analytics and
 budget utilization via API → (Celery, auto-chained) duplicate / category /
 recurring / anomaly enrichment.** There is no forecasting and no LLM call
-in the running system (an LLM classifier exists, is off by default, and was
-run only for evaluation; see Phase 5 caveats). Categories are assigned by
+in the running system (an LLM classifier exists but is not wired into the
+pipeline; it was run only for evaluation — see Phase 5 caveats). Categories are assigned by
 rules/ML when confident, suggested when not, and always overridable by hand.
 
 ---
@@ -163,7 +163,7 @@ personal_finance_llm/
 │       │   ├── service.py                 # the only DB-touching module; per-user advisory lock
 │       │   ├── synthetic.py               # synthetic labeled data + user histories
 │       │   ├── eval.py  train.py          # evaluation harness; model training CLI
-│       │   ├── llm_classifier.py          # UNVERIFIED interface (no API key was available)
+│       │   ├── llm_classifier.py          # Anthropic + Gemini adapters (opt-in)
 │       │   └── eval_llm.py  eval_public.py  # scripts for YOU to run (need a key / HF access)
 │       └── pipeline/
 │           ├── tasks.py                   # Celery tasks: process_document, normalize_document, enrich_user_transactions
@@ -421,8 +421,8 @@ a comparison between methods, not as a forecast of real-world accuracy.
 | Recurring | series precision 1.00 / recall 0.97 on 20 synthetic users; missed: monthly bills whose date wanders more than ±4.5 days month to month |
 | Duplicates | P/R 1.00 on synthetic re-uploads (exact copies — real exports differ more); 0 flags on hard negatives (daily fare, two identical chais with different refs). Auto-apply recall only 0.59 by design |
 | Anomalies | at threshold 3.5: precision 0.89, recall 0.36 overall — 0.55 on "severe" injections, 0.13 on "moderate" ones. PR-AUC: robust-z 0.63 ≈ IQR 0.64 ≫ Isolation Forest 0.36 |
-| LLM (Gemini 3.5 Flash-Lite, n=300) | 94.3% accuracy vs 91.3% for hybrid on the same synthetic holdout; 0 abstentions. Synthetic data flatters all methods — see caveats |
-| Public OOD (12,144 mapped rows) | 48.9% coverage, 48.6% precision on answered, 23.8% accuracy if abstentions count wrong. Lossy label map; not a benchmark |
+| LLM (Gemini 3.5 Flash-Lite, n=300) | 94.3% accuracy vs 91.3% for hybrid on the same synthetic holdout; 0 abstentions (fixed confidence, not calibration). Separate protocol, not this 5-fold CV. Synthetic data flatters all methods — see caveats |
+| Public OOD (12,144 mapped of 20,000 requested) | 60.7% of requested rows mapped; 48.9% answer coverage on mapped rows, 48.6% precision on answered, 23.8% accuracy if abstentions count wrong. Lossy label map; not a benchmark |
 | Cost at scale | 100k transactions for one user: duplicates 3 s, classify 77 s, recurring 3 s, anomalies 41 s; ~0.8 GB peak RSS (Postgres 16, no concurrency) |
 
 **What the ML classifier actually tells you.** It is a lookup of merchant names it has
@@ -432,7 +432,7 @@ an LLM's world knowledge (the Gemini path is now verified against the real API; 
 Anthropic path remains unverified because no Anthropic key was available).
 
 **Not done / not verified (Phase 5)**
-- **Anthropic path unverified.** The Gemini adapter (`gemini-3.5-flash-lite`) was run against the real API and completed n=300; the Anthropic model id in settings is still a guess because no Anthropic key was available. Both remain off by default (`LLM_CLASSIFIER_ENABLED=false`); enabling sends narrations to the selected provider.
+- **Anthropic path unverified.** The Gemini adapter (`gemini-3.5-flash-lite`) was run against the real API and completed n=300; the Anthropic model id in settings is still a guess because no Anthropic key was available. Neither is wired into the pipeline; `LLM_CLASSIFIER_ENABLED` currently only controls the `/ml/status` report, and the eval script calls the provider directly.
 - **Free-tier LLM quota is 20 requests per model per day.** n=300 uses 12 requests; `gemini-2.5-flash` is closed to new keys, and 3.5/3.8 Flash returned 503s during the eval (hence Flash-Lite).
 - **Public OOD is a signal, not a benchmark.** The dataset's categories do not match this project's ten, so rows without a counterpart were dropped and the remaining label map is lossy. Its MIT label does not settle where the underlying rows came from.
 - **No feedback loop.** Your corrections are stored (`category_source='user'`) but nothing retrains on them yet — this is the highest-value next step for the classifier.

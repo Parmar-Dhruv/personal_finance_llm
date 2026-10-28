@@ -1,17 +1,20 @@
 {
   "dataset": "app.ml.synthetic held-out ('test') merchants, unseen by rules and the ML model",
   "generated_at": "2026-10-28",
-  "command": "docker compose run --rm --no-deps backend python -m app.ml.eval_llm --n 300",
+  "command": "docker compose run --rm --no-deps backend python -m app.ml.eval_llm --n 300 --provider gemini --model gemini-3.5-flash-lite",
   "provider": "gemini",
   "model": "gemini-3.5-flash-lite",
   "n": 300,
   "hybrid_accuracy": 0.9133,
   "llm_accuracy": 0.9433,
   "llm_abstained": 0,
+  "metrics_note": "Accuracy counts abstentions as wrong. Macro-F1 and per-class metrics were not computed. The hybrid baseline uses min_confidence=0.0 (evaluation mode), not the production suggest-first policy.",
+  "protocol": "Single holdout of synthetic 'test' merchants; not the 5-fold merchant-grouped CV in report.md.",
   "caveats": [
     "Synthetic merchants: this measures interface correctness and relative accuracy, not real-statement accuracy.",
     "The first-choice model (gemini-2.5-flash) is closed to new API keys; 3.8/3.5 Flash returned free-tier 503s, so Flash-Lite was used.",
     "Free-tier quota is 20 generate requests per model per day; n=300 uses 12. A rerun on the same day may return 429.",
-    "Temperature 0.0, 25 items per request, structured JSON schema shared with the Anthropic adapter."
+    "Temperature 0.0, 25 items per request, structured JSON schema shared with the Anthropic adapter.",
+    "0 abstentions reflects the fixed LLM_CONFIDENCE=0.80, not calibration."
   ]
 }

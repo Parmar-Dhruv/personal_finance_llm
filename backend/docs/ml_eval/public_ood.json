@@ -6,10 +6,17 @@
   "mode": "rules+ml",
   "rows_requested": 20000,
   "rows_mapped": 12144,
+  "rows_mapped_share": 0.6072,
   "label_map": "lossy; categories without a counterpart were dropped (Financial Services, Income, Government & Legal, Charity & Donations)",
   "coverage": 0.4888,
+  "coverage_definition": "answered / rows_mapped (not rows_mapped / rows_requested)",
   "accuracy_abstain_wrong": 0.2376,
   "precision_on_answered": 0.4862,
+  "protocol_caveats": [
+    "The 20,000 rows are the first slice of the split, not a random sample.",
+    "Every row is evaluated as debit / amount 100.0 / merchant None; the public schema has no equivalent fields here.",
+    "No per-class or macro-F1 metrics were computed."
+  ],
   "caveats": [
     "Out-of-distribution signal only, not a benchmark: the public label taxonomy does not match this project's ten categories.",
     "The dataset card is MIT-labelled but mixes synthetic and unnamed external sources.",

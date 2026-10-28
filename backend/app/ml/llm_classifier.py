@@ -10,9 +10,10 @@ an injected instruction can at worst pick a wrong label -- never free text or
 a tool call. Run `python -m app.ml.eval_llm` to reproduce the comparison.
 
 Design points that don't depend on the network:
-* Opt-in (`settings.llm_classifier_enabled`, default False): transaction
-  narrations leave the machine for the selected provider, and narrations can
-  contain names and account fragments. Nothing here is on by default.
+* Opt-in by intent (`settings.llm_classifier_enabled`, default False):
+  transaction narrations leave the machine for the selected provider, and
+  narrations can contain names and account fragments. The flag currently only
+  controls the `/ml/status` report; nothing in the pipeline calls this module.
 * Narrations are UNTRUSTED text that could contain "ignore previous
   instructions". The model is forced to answer through a tool whose input
   schema is an enum of the 10 labels, and the parser re-validates against

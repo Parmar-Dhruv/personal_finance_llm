@@ -1,6 +1,12 @@
 # Phase 5 evaluation (synthetic data)
 
 > All numbers are from synthetic data authored alongside the models -- optimistic by construction. Use them to compare methods, not as an accuracy promise.
+>
+> This file covers the 5-fold cross-validation run. Two supplementary protocols live beside it:
+> `public_ood.json` (12,144 mapped of 20,000 requested rows; 60.7% mapped, 48.9% answer coverage,
+> 48.6% precision on answered, 23.8% abstain-as-wrong) and `llm_synthetic.json`
+> (Gemini 3.5 Flash-Lite, single n=300 holdout; 94.3% vs hybrid 91.3%, 0 abstentions).
+> Those are not comparable to the CV numbers below.
 
 ## Classification -- 9000 txns, 237 merchants, 5-fold CV grouped by merchant
 
@@ -9,7 +15,7 @@
 | Rules | 0.8196 | 0.9121 | coverage 0.8283, precision-on-answered 0.9894 |
 | ML (TF-IDF + LogReg) | 0.4199 | 0.5097 | always answers |
 | Hybrid | 0.8643 | 0.8908 | rules + ML |
-| LLM | not run | not run | no API key in the build sandbox -- see README Known Gaps |
+| LLM (Gemini 3.5 Flash-Lite) | 0.9433* | not computed* | *Separate n=300 holdout, not this CV. Hybrid on the same holdout: 0.9133; 0 abstentions. See `llm_synthetic.json`. |
 
 ### Hybrid confidence sweep
 

@@ -38,9 +38,9 @@ class Settings(BaseSettings):
     # Phase 5. Empty = <backend>/models. The model file is a pickle: only ever
     # point this at a directory this application (or you) wrote.
     ml_model_dir: str = ""
-    # Opt-in: sends transaction narrations to the selected provider. Off by default.
+    # Reporting flag only: nothing in the pipeline calls the LLM classifier yet.
     llm_classifier_enabled: bool = False
-    # "anthropic" | "gemini". Both adapters exist; the pipeline stays opt-in.
+    # "anthropic" | "gemini". Both adapters exist; the pipeline does not call them yet.
     llm_provider: str = "anthropic"
     # UNVERIFIED Anthropic model id (no key in the build sandbox) -- confirm before enabling.
     llm_classifier_model: str = "claude-haiku-5-5"

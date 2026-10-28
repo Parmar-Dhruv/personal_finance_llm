@@ -6,7 +6,7 @@ compute (and don't), and how to run the test suite. For the project-level
 overview see the [root README](../README.md); for decisions and history see
 [`PROGRESS_TRACKER.md`](../PROGRESS_TRACKER.md).
 
-**Status: Phases 0–5 of 13 built.** Classical ML (scikit-learn) and statistical detectors exist. An opt-in LLM classifier (Anthropic + Gemini adapters) is available but off by default; the Gemini adapter was run against the real API for evaluation, the Anthropic adapter remains unverified.
+**Status: Phases 0–5 of 13 built.** Classical ML (scikit-learn) and statistical detectors exist. An opt-in LLM classifier (Anthropic + Gemini adapters) exists but is not wired into the pipeline; the Gemini adapter was run against the real API for evaluation, the Anthropic adapter remains unverified.
 
 ---
 
@@ -185,8 +185,8 @@ Every step is idempotent, user-scoped, and serialized per user by a Postgres adv
 
 ### Phase 5 evaluation results
 - **Synthetic holdout** (merchant-grouped CV): rules 82%, ML-only 42%, hybrid 86% accuracy (abstentions count as wrong).
-- **Public OOD** (`docs/ml_eval/public_ood.json`, 12,144 mapped rows): 48.9% coverage, 48.6% precision on answered, 23.8% accuracy counting abstentions as wrong. The label map is lossy; treat this as a warning signal, not a benchmark.
-- **LLM** (`docs/ml_eval/llm_synthetic.json`, Gemini 3.5 Flash-Lite, n=300, 25 per request): 94.3% accuracy vs 91.3% for hybrid on the same synthetic holdout, 0 abstentions. Synthetic merchants flatter every method; this does not establish real-statement accuracy.
+- **Public OOD** (`docs/ml_eval/public_ood.json`, 12,144 mapped of 20,000 requested): 60.7% of requested rows mapped; among mapped rows, 48.9% answer coverage, 48.6% precision on answered, 23.8% accuracy counting abstentions as wrong. The label map is lossy; treat this as a warning signal, not a benchmark.
+- **LLM** (`docs/ml_eval/llm_synthetic.json`, Gemini 3.5 Flash-Lite, n=300, 25 per request): 94.3% accuracy vs 91.3% for hybrid on the same synthetic holdout, 0 abstentions (fixed `LLM_CONFIDENCE=0.80`, not calibration). This is a separate single-holdout protocol, not the 5-fold CV above. Synthetic merchants flatter every method; this does not establish real-statement accuracy.
 
 ### Duplicates
 Compared only within the same account, currency, direction and exact amount, within 3 days.
@@ -300,6 +300,15 @@ No mocks. It needs:
 pip install -r requirements-dev.txt
 export TEST_DATABASE_URL=postgresql+psycopg://finsight:finsight_dev_password@localhost:5432/finsight_test
 pytest
+```
+
+The production image does not include pytest, and `localhost` is the wrong DB
+host inside Compose. To run the same suite in the running stack:
+
+```bash
+docker compose run --rm --no-deps \
+  -e TEST_DATABASE_URL=postgresql+psycopg://finsight:finsight_dev_password@db:5432/finsight_test \
+  backend sh -c "pip install -q -r requirements-dev.txt && pytest"
 ```
 
 What's covered (Phase 4 portion, 60 of 151 tests; Phase 5 coverage is described above): exact-decimal sums (1000 × 0.10 = 100.00); currency
