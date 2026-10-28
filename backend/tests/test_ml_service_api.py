@@ -76,7 +76,9 @@ def cat_id(user, name):
 @pytest.mark.parametrize("method,url", [
     ("get", "/ml/status"), ("post", "/ml/run"), ("get", "/ml/suggestions"), ("get", "/ml/duplicates"),
     ("get", "/ml/recurring"), ("get", "/ml/anomalies"), ("get", "/analytics/recurring"),
-    ("post", f"/transactions/{uuid.uuid4()}/suggestion/accept"), ("post", f"/transactions/{uuid.uuid4()}/duplicate/confirm"),
+    ("post", f"/transactions/{uuid.uuid4()}/suggestion/accept"),
+    ("post", f"/transactions/{uuid.uuid4()}/suggestion/undismiss"),
+    ("post", f"/transactions/{uuid.uuid4()}/duplicate/confirm"),
 ])
 def test_endpoints_require_auth(client, method, url):
     assert getattr(client, method)(url).status_code == 401
@@ -150,6 +152,24 @@ def test_accept_and_reject_suggestions(alice, with_model, put):
     assert rej["category_id"] is None and rej["suggested_category_id"] is None
     alice.post("/ml/run", json={"force_reclassify": True})
     assert txn(alice, b)["suggested_category_id"] is None  # rejection sticks, even on force
+
+
+def test_undismiss_re_enables_suggestions(alice, with_model, put, db):
+    acct = alice.account()
+    t = put(alice, acct, "2026-03-02", "5000.00", "Max Healthcare")
+    alice.post("/ml/run")
+    assert txn(alice, t)["suggested_category_id"]
+    assert alice.post(f"/transactions/{t}/suggestion/undismiss").status_code == 409  # not dismissed
+
+    alice.post(f"/transactions/{t}/suggestion/reject")
+    assert db.get(Transaction, uuid.UUID(t)).suggestion_dismissed is True
+
+    out = alice.post(f"/transactions/{t}/suggestion/undismiss").json()
+    assert out["suggested_category_id"] is None and out["category_id"] is None
+    assert db.get(Transaction, uuid.UUID(t)).suggestion_dismissed is False
+
+    alice.post("/ml/run", json={"force_reclassify": True})
+    assert txn(alice, t)["suggested_category_id"]  # the classifier may suggest again
 
 
 def test_explicit_clear_stops_reclassification(alice, with_model, put):

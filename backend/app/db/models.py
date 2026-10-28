@@ -243,7 +243,16 @@ class MerchantAlias(TimestampMixin, Base):
     """
 
     __tablename__ = "merchant_aliases"
-    __table_args__ = (UniqueConstraint("user_id", "pattern", name="uq_merchant_alias_user_pattern"),)
+    __table_args__ = (
+        # NULLS NOT DISTINCT: system aliases have user_id NULL, and a plain
+        # UNIQUE would let the same seeded pattern be inserted repeatedly.
+        UniqueConstraint(
+            "user_id",
+            "pattern",
+            name="uq_merchant_alias_user_pattern",
+            postgresql_nulls_not_distinct=True,
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=PK_DEFAULT

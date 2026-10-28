@@ -45,7 +45,7 @@ def _scalar(engine, sql):
 
 def test_full_chain_and_roundtrip(engine):
     alembic("upgrade", "head")
-    assert _scalar(engine, "SELECT version_num FROM alembic_version") == "0005_ml_layer"
+    assert _scalar(engine, "SELECT version_num FROM alembic_version") == "0006_merchant_alias_uniqueness"
     assert _scalar(engine, "SELECT count(*) FROM categories WHERE is_system AND user_id IS NULL") == 10
 
     # Phase 4 constraints, exercised in raw SQL
@@ -107,4 +107,22 @@ def test_0005_backfill_constraints_and_roundtrip(engine):
     assert _scalar(engine, "SELECT to_regclass('public.recurring_series')") is None
     assert _scalar(engine, "SELECT count(*) FROM information_schema.columns WHERE table_name='transactions' AND column_name='anomaly_score'") == 0
     assert _scalar(engine, "SELECT count(*) FROM transactions") == 2  # data survives the round trip
+    alembic("upgrade", "head")
+
+
+def test_0006_merchant_alias_scope_uniqueness(engine):
+    """System aliases (user_id NULL) must collide by pattern; 0006 is reversible."""
+    alembic("upgrade", "head")
+    insert = "INSERT INTO merchant_aliases (pattern, canonical_name, is_system) VALUES ('^uniqueness-probe', 'Probe', true)"
+    with engine.begin() as c:
+        c.execute(text(insert))
+    with pytest.raises(IntegrityError):
+        with engine.begin() as c:
+            c.execute(text(insert))
+
+    alembic("downgrade", "0005_ml_layer")
+    with engine.begin() as c:
+        c.execute(text(insert))  # plain UNIQUE treats NULL user_id rows as distinct
+    with engine.begin() as c:
+        c.execute(text("DELETE FROM merchant_aliases WHERE pattern='^uniqueness-probe'"))
     alembic("upgrade", "head")

@@ -1,5 +1,5 @@
 import uuid
-from datetime import date
+from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -31,7 +31,12 @@ def list_transactions(
     if date_from is not None:
         stmt = stmt.where(Transaction.transaction_date >= date_from)
     if date_to is not None:
-        stmt = stmt.where(Transaction.transaction_date <= date_to)
+        # Half-open upper bound so the whole of date_to is included even for
+        # rows that carry a time-of-day (same convention as app/analytics).
+        stmt = stmt.where(
+            Transaction.transaction_date
+            < datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=timezone.utc)
+        )
     if is_anomaly is not None:
         stmt = stmt.where(Transaction.is_anomaly.is_(is_anomaly))
     if is_recurring is not None:
@@ -118,6 +123,27 @@ def reject_suggestion(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No pending suggestion")
     txn.suggested_category_id = txn.suggested_category_confidence = txn.suggested_category_source = None
     txn.suggestion_dismissed = True
+    db.commit()
+    db.refresh(txn)
+    return txn
+
+
+@router.post("/{transaction_id}/suggestion/undismiss", response_model=TransactionRead)
+def undismiss_suggestion(
+    transaction_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Transaction:
+    """
+    Undo an explicit rejection/clear so the classifier may suggest again.
+
+    Only the dismissal flag is cleared. A user-assigned category is still
+    final, and any already-applied machine category is left untouched.
+    """
+    txn = _owned(db, current_user, transaction_id)
+    if not txn.suggestion_dismissed:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Suggestion is not dismissed")
+    txn.suggestion_dismissed = False
     db.commit()
     db.refresh(txn)
     return txn
