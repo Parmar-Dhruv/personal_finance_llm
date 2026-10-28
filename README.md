@@ -25,7 +25,7 @@ snapshot; that file is the source of truth.
 | 2 — Document intelligence | ✅ | OCR, table extraction, per-page provenance |
 | 3 — Data normalization | ✅ | Dates/amounts/currency → structured `Transaction` rows, merchant canonicalization |
 | 4 — Deterministic analytics | ✅ | Income/expense/net cash flow, monthly trends, category/merchant/account summaries, monthly budgets + utilization — all SQL/`Decimal`, per currency |
-| 5 — ML layer | ✅ | Rule + ML transaction classification (suggest-first, never overwrites you), duplicate detection with a review queue, recurring-payment detection (+ recurring totals), robust-statistics anomaly flags. **Measured on synthetic data only — read the Phase 5 caveats below.** |
+| 5 — ML layer | ✅ | Rule + ML transaction classification (suggest-first, never overwrites you), duplicate detection with a review queue, recurring-payment detection (+ recurring totals), robust-statistics anomaly flags. Evaluated on synthetic holdout, a public out-of-distribution dataset, and a real Gemini run — **read the Phase 5 caveats below.** |
 | 6–13 | ⬜ | Forecasting, RAG, agentic Q&A, product features, evaluation, security hardening, frontend, deployment |
 
 A document today flows: **upload → object storage → OCR/table
@@ -33,8 +33,8 @@ extraction (Celery) → date/amount/merchant normalization (Celery,
 auto-chained) → queryable `Transaction` rows → deterministic analytics and
 budget utilization via API → (Celery, auto-chained) duplicate / category /
 recurring / anomaly enrichment.** There is no forecasting and no LLM call
-anywhere in the running system (an LLM classifier exists as an *unverified,
-off-by-default interface*; see Phase 5 caveats). Categories are assigned by
+in the running system (an LLM classifier exists, is off by default, and was
+run only for evaluation; see Phase 5 caveats). Categories are assigned by
 rules/ML when confident, suggested when not, and always overridable by hand.
 
 ---
@@ -110,8 +110,8 @@ personal_finance_llm/
 │   ├── requirements.lock.txt              # pinned prod freeze; Docker installs this
 │   ├── requirements-dev.txt               # lock + pytest + httpx
 │   ├── pytest.ini
-│   ├── docs/ml_eval/                      # Phase 5 evaluation report (report.md / report.json), regenerate: python -m app.ml.eval
-│   ├── tests/                             # 147 real-Postgres tests (Phase 4: 60; Phase 5: 83; pre-Phase 6 hardening: 4)
+│   ├── docs/ml_eval/                      # Phase 5 reports: synthetic CV, public OOD, real Gemini run
+│   ├── tests/                             # 151 real-Postgres tests (Phase 4: 60; Phase 5: 87; pre-Phase 6 hardening: 4)
 │   ├── alembic/
 │   │   └── versions/
 │   │       ├── 0001_initial_schema.py     # users, accounts, categories, documents, transactions
@@ -421,17 +421,20 @@ a comparison between methods, not as a forecast of real-world accuracy.
 | Recurring | series precision 1.00 / recall 0.97 on 20 synthetic users; missed: monthly bills whose date wanders more than ±4.5 days month to month |
 | Duplicates | P/R 1.00 on synthetic re-uploads (exact copies — real exports differ more); 0 flags on hard negatives (daily fare, two identical chais with different refs). Auto-apply recall only 0.59 by design |
 | Anomalies | at threshold 3.5: precision 0.89, recall 0.36 overall — 0.55 on "severe" injections, 0.13 on "moderate" ones. PR-AUC: robust-z 0.63 ≈ IQR 0.64 ≫ Isolation Forest 0.36 |
+| LLM (Gemini 3.5 Flash-Lite, n=300) | 94.3% accuracy vs 91.3% for hybrid on the same synthetic holdout; 0 abstentions. Synthetic data flatters all methods — see caveats |
+| Public OOD (12,144 mapped rows) | 48.9% coverage, 48.6% precision on answered, 23.8% accuracy if abstentions count wrong. Lossy label map; not a benchmark |
 | Cost at scale | 100k transactions for one user: duplicates 3 s, classify 77 s, recurring 3 s, anomalies 41 s; ~0.8 GB peak RSS (Postgres 16, no concurrency) |
 
 **What the ML classifier actually tells you.** It is a lookup of merchant names it has
 seen, with some tolerance for typos and truncation. On a merchant it never saw it is
 mostly guessing. The honest fixes are real or user-corrected labels (not yet built) and/or
-an LLM's world knowledge (interface built, **never run against the real API** — no key in the
-build sandbox).
+an LLM's world knowledge (the Gemini path is now verified against the real API; the
+Anthropic path remains unverified because no Anthropic key was available).
 
 **Not done / not verified (Phase 5)**
-- **LLM classifier: unverified.** `app/ml/llm_classifier.py` + `python -m app.ml.eval_llm` exist; only prompt construction and response validation are tested. Model id in settings is a best guess. Off by default; enabling sends narrations to Anthropic's API.
-- **Public-dataset out-of-distribution check: not run.** huggingface.co is unreachable from the sandbox. `python -m app.ml.eval_public` is provided with a lossy label map; its MIT label doesn't settle where the underlying rows came from.
+- **Anthropic path unverified.** The Gemini adapter (`gemini-3.5-flash-lite`) was run against the real API and completed n=300; the Anthropic model id in settings is still a guess because no Anthropic key was available. Both remain off by default (`LLM_CLASSIFIER_ENABLED=false`); enabling sends narrations to the selected provider.
+- **Free-tier LLM quota is 20 requests per model per day.** n=300 uses 12 requests; `gemini-2.5-flash` is closed to new keys, and 3.5/3.8 Flash returned 503s during the eval (hence Flash-Lite).
+- **Public OOD is a signal, not a benchmark.** The dataset's categories do not match this project's ten, so rows without a counterpart were dropped and the remaining label map is lossy. Its MIT label does not settle where the underlying rows came from.
 - **No feedback loop.** Your corrections are stored (`category_source='user'`) but nothing retrains on them yet — this is the highest-value next step for the classifier.
 - Rules were written by the same person as the test merchants — expect lower precision on real statements.
 - Anomaly detection can only flag *unusually large* amounts, needs history (≥8 txns for the merchant, ≥15 for the category, or ≥30 user-wide, per currency and direction), and cannot see a charge ≤2.2× a perfectly flat baseline (e.g. rent 22,000 → 40,000 is not flagged).
@@ -448,7 +451,7 @@ build sandbox).
 Every phase is tested against real infrastructure — real Postgres, real
 SeaweedFS, a real Celery worker on a real broker, real HTTP requests —
 never mocks. From Phase 4 on, the Postgres-backed tests are a committed
-pytest suite (`backend/tests/`, 147 tests; run instructions in
+pytest suite (`backend/tests/`, 151 tests; run instructions in
 `backend/README.md`) rather than throwaway scripts; earlier phases'
 SeaweedFS / Celery / OCR checks were run ad hoc and are *not* part of that
 suite. Where the sandbox used for development lacks a service

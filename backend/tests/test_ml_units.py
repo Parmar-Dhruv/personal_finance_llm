@@ -378,3 +378,43 @@ def test_llm_batching_plumbing_with_a_stand_in_client():
     assert len(out) == 60 and all(p.label == "Food" for p in out)
     assert [c["messages"][0]["content"].count("\n") for c in calls] == [25, 25, 10]
     assert all(c["tool_choice"] == {"type": "tool", "name": llm.TOOL_NAME} for c in calls)
+
+
+def test_gemini_reuses_the_validated_tool_schema():
+    assert llm.json_schema() == llm.tool_schema()["input_schema"]
+
+
+def test_gemini_batching_and_structured_output_with_a_stand_in_client():
+    calls = []
+    class Models:
+        @staticmethod
+        def generate_content(**kw):
+            calls.append(kw)
+            n = kw["contents"].count("\n")
+            text = json.dumps({"results": [{"index": i, "category": "Food"} for i in range(n)]})
+            return type("R", (), {"text": text})
+    class Client:
+        models = Models
+    items = [("SWIGGY", None, "debit", 10.0)] * 60
+    out = llm.GeminiClassifier(client=Client, model="m").classify(items)
+    assert len(out) == 60 and all(p.label == "Food" for p in out)
+    assert [c["contents"].count("\n") for c in calls] == [25, 25, 10]
+    assert all(c["model"] == "m" for c in calls)
+    assert all(c["config"].response_mime_type == "application/json" for c in calls)
+    assert all(c["config"].temperature == 0.0 for c in calls)
+
+
+def test_gemini_abstains_on_unparseable_text():
+    class Client:
+        class models:
+            @staticmethod
+            def generate_content(**kw):
+                return type("R", (), {"text": "not json"})
+    assert llm.GeminiClassifier(client=Client, model="m").classify(ITEMS) == [None, None, None]
+
+
+def test_llm_provider_factory_selects_explicitly():
+    assert isinstance(llm.get_llm_classifier(provider="gemini", client=object()), llm.GeminiClassifier)
+    assert isinstance(llm.get_llm_classifier(provider="anthropic", client=object()), llm.LLMClassifier)
+    with pytest.raises(ValueError, match="Unknown LLM provider"):
+        llm.get_llm_classifier(provider="bogus", client=object())

@@ -67,3 +67,7 @@ rapidfuzz
 scikit-learn
 numpy
 joblib
+# google-genai (Apache-2.0): the optional Gemini LLM adapter. The pipeline is
+# still opt-in; Earth/synthetic evaluation runs offline. Verified current
+# 2026-10-28 (2.33.0) and against the real Gemini API.
+google-genai

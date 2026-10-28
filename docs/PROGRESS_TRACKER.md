@@ -41,8 +41,8 @@ finsight/
         tasks.py
         extractors/ (common.py, ocr.py, pdf.py, image.py, spreadsheet.py)
         normalize/ (dates.py, amounts.py, merchants.py, columns.py, engine.py)
-    tests/ (conftest.py + 10 test modules, 147 tests, real Postgres)      # Phase 4: 60, Phase 5: +83
-    docs/ml_eval/ (report.md, report.json)                               # Phase 5, regenerate with python -m app.ml.eval
+    tests/ (conftest.py + 10 test modules, 151 tests, real Postgres)      # Phase 4: 60, Phase 5: +91
+    docs/ml_eval/ (report.md/json, public_ood.json, llm_synthetic.json)  # Phase 5 evals
     README.md, pytest.ini, requirements-dev.txt
   frontend/
     package.json, tsconfig.json, next.config.mjs, Dockerfile
@@ -121,19 +121,19 @@ verified. 🔶 = in progress. ⬜ = not started.
   - ✅ Budget utilization math (monthly budgets, category-subtree roll-up)
   - ✅ Minimal categories API + manual category assignment (gap patch, see Session 4)
   - ✅ "Recurring expense totals" (spec §8) — delivered in Phase 5 as GET /analytics/recurring
-- **Phase 5 — ML Layer** ✅ (with unverified pieces, see Known Gaps)
+- **Phase 5 — ML Layer** ✅ (Anthropic path still unverified, see Known Gaps)
   - ✅ Transaction classification: rules baseline, TF-IDF+LogReg, hybrid policy (suggest-first), measured on synthetic data with merchant-grouped CV
-  - 🔶 LLM leg of the comparison: interface + eval script written; API path reachable, but **never run against the real API** (key still blank)
+  - ✅ LLM leg: Anthropic + Gemini adapters; real Gemini run n=300 → 94.3% vs hybrid 91.3% on synthetic holdout (`docs/ml_eval/llm_synthetic.json`)
   - ✅ Duplicate detection with auto/pending/confirmed/dismissed review workflow
   - ✅ Recurring payment detection + /analytics/recurring totals
   - ✅ Anomaly detection (robust z hierarchy; IQR + Isolation Forest as benchmarks)
-  - 🔶 Public-dataset out-of-distribution check: script written; dataset is now **gated** (needs HF_TOKEN + accepted terms)
-- **Pre-Phase 6 — maintenance** ✅ (evals still need user credentials)
+  - ✅ Public-dataset out-of-distribution check: 12,144 mapped rows, coverage 48.9%, precision-on-answered 48.6% (`docs/ml_eval/public_ood.json`); lossy label map, signal only
+- **Pre-Phase 6 — maintenance** ✅
   - ✅ Git baseline against the existing remote, docs tracked, pushed to `main`
-  - ✅ Full Docker build + PG18.6 stack, migrations 0001→0006, model training, 147-test suite
+  - ✅ Full Docker build + PG18.6 stack, migrations 0001→0006, model training, 151-test suite
   - ✅ UTF-8 production lockfile; Dockerfile/dev requirements install it
   - ✅ MerchantAlias uniqueness, inclusive `date_to`, suggestion undismiss
-  - 🔶 `eval_llm` / `eval_public`: exact user-run commands recorded in Known Gaps
+  - ✅ `eval_llm` / `eval_public` both run with user-supplied credentials; artifacts committed
 - **Phase 6 — Forecasting** ⬜
   - ⬜ Baseline statistical forecast, then ML forecast benchmarked against it
 - **Phase 7 — RAG** ⬜
@@ -191,8 +191,8 @@ verified. 🔶 = in progress. ⬜ = not started.
 | "Spent" definition for budgets | Gross debits in the budget's currency in the calendar month, excluding flagged duplicates; refunds not netted | Net of refunds | Simplest unambiguous definition; refunds need Phase 5 context to attribute to the right category. Logged as a gap |
 | Month bucketing | UTC calendar months | User-timezone months | Phase 3 stores dates as midnight-UTC calendar dates, so UTC is exactly right for stored data; a user timezone would only matter for the "current month" default |
 | Money in API JSON | `Decimal` → string | float | Same reasoning as `Numeric` storage; clients can't lose cents |
-| Phase 5 labeled data | Own seeded synthetic generator for training + merchant-grouped CV; separate OOD check on the public HF dataset | Public HF dataset (mitulshah/transaction-categorization) as the training source | Dhruv's call ("both, separately"). HF dataset is MIT-labelled but mixes synthetic and unnamed external sources, and its categories don't match ours. The OOD check could not run (HF blocked in sandbox) → script only |
-| Phase 5 LLM classifier | Interface + eval script, off by default, real eval deferred | Run it now; defer to Phase 8 | Dhruv's call (recommended). No API key in sandbox; BUILD_LOOP forbids counting unverified work as done |
+| Phase 5 labeled data | Own seeded synthetic generator for training + merchant-grouped CV; separate OOD check on the public HF dataset | Public HF dataset (mitulshah/transaction-categorization) as the training source | Dhruv's call ("both, separately"). HF dataset is MIT-labelled but mixes synthetic and unnamed external sources, and its categories don't match ours. The OOD check could not run (HF blocked in sandbox) → script only. **Update (Session 6):** run with an HF token on 12,144 mapped rows; signal only, not a benchmark |
+| Phase 5 LLM classifier | Interface + eval script, off by default, real eval deferred | Run it now; defer to Phase 8 | Dhruv's call (recommended). No API key in sandbox; BUILD_LOOP forbids counting unverified work as done. **Update (Session 6):** Gemini adapter added and run; Anthropic still unverified |
 | Phase 5 auto-apply policy | Suggest-first: rule/hybrid auto-apply, ML-only suggestions; never overwrite user categories; duplicates auto only at ≥0.95 | Always write category_id; never auto-apply anything | Dhruv's call (recommended). Evaluation then showed why it matters: ML-only precision on unseen merchants is ~30% with anti-calibrated confidence, so the ML-only auto threshold is `null` (never) |
 | Phase 5 scope | All four components in one phase | Split into 5a/5b | Dhruv's call |
 | Anomaly method | Robust z-score (median/MAD, log amount), hierarchical baseline | Isolation Forest; IQR | **My call, not surfaced** (judged low-stakes): PR-AUC on injected synthetic anomalies robust-z 0.63 ≈ IQR 0.64 ≫ IF 0.36, and z-scores are explainable (`anomaly_detail`). IQR is equally good here; z chosen for the conventional 3.5 cutoff |
@@ -206,7 +206,7 @@ verified. 🔶 = in progress. ⬜ = not started.
 | Dependency pinning (pre-Phase 6) | Freeze production deps inside the Linux image → UTF-8 `requirements.lock.txt`; Dockerfile and `requirements-dev.txt` install the lock | Dockerfile stays on unpinned `requirements.txt`; regenerate a Windows freeze | Reproducible image; a Windows freeze would leak platform-only packages. Dev installs the same production pins |
 | Local env/DB (pre-Phase 6) | Reuse the existing `finsight_dev_password` volume (empty), generate only a random `SECRET_KEY`; create `finsight_test` + `finsight_migration_test` in the same PG18 container | Reset volumes with a new password / separate test container | Volumes already existed and held no data; the test suite and compose defaults already use that password |
 | Pre-Phase 6 hardening | Migration 0006 for `MerchantAlias` `UNIQUE NULLS NOT DISTINCT`; `GET /transactions?date_to=` half-open; `suggestion/undismiss` endpoint | Carry them into Phase 6 as known gaps | All three were small, isolated, and easier to verify before Phase 6 adds another migration |
-| Phase 5 eval execution | User runs `eval_llm` with their key; `eval_public` needs an authenticated HF account because the dataset is gated | Run them in this session without a key/token | Network works from the container, but no Anthropic key is present and HF requires accepted terms + token |
+| Phase 5 eval execution | User runs `eval_llm` with their key; `eval_public` needs an authenticated HF account because the dataset is gated | Run them in this session without a key/token | Network works from the container, but no Anthropic key is present and HF requires accepted terms + token. **Update (Session 6):** user supplied Gemini + HF credentials; both evals run and recorded |
 
 ---
 
@@ -341,8 +341,9 @@ verified. 🔶 = in progress. ⬜ = not started.
 
 ### Added in Phase 5
 
-- **LLM classifier still not run against the real API.** API is reachable from the container (401 without a key) but `ANTHROPIC_API_KEY` is blank. Model id in settings (`claude-haiku-5-5`) is unconfirmed; latency/cost/accuracy unknown. Pre-Phase 6 verified only that the network path exists. User action: add the key to `.env`, then `docker compose run --rm --no-deps backend python -m app.ml.eval_llm --n 300`
-- **Public-dataset OOD check not run; the HF dataset is now gated.** `mitulshah/transaction-categorization` requires an authenticated account that has accepted its terms. User action: add `HF_TOKEN` to `.env`, then `docker compose run --rm --no-deps -e HF_HOME=/tmp/hf backend sh -c "pip install --no-cache-dir -q datasets && python -m app.ml.eval_public --limit 20000"`. The script still assumes the card's column names and a lossy label map
+- **Anthropic LLM path still unverified; Gemini verified.** `gemini-3.5-flash-lite` completed n=300 against the real API (94.3% vs hybrid 91.3%, synthetic holdout; 0 abstentions). The Anthropic model id (`claude-haiku-5-5`) remains a guess. Both adapters are off by default; `LLM_PROVIDER` selects one. Reproduce: `docker compose run --rm --no-deps backend python -m app.ml.eval_llm --n 300`.
+- **Gemini free tier limits the eval.** 20 requests/model/day; n=300 uses 12. `gemini-2.5-flash` is closed to new keys; 3.8/3.5 Flash returned 503s, so Flash-Lite was used. The adapter retries 429/5xx four times with backoff; 60 s request timeout.
+- **Public OOD check run, but not a benchmark.** 12,144 of 20,000 rows mapped (48.9% coverage), 48.6% precision on answered, 23.8% accuracy counting abstentions as wrong (`docs/ml_eval/public_ood.json`). The dataset's categories do not match this project's ten; the map is lossy and its MIT label does not settle provenance.
 - **All ML numbers are synthetic and same-author.** Rules were written by the person who wrote the evaluation merchants; expect worse on real statements
 - **ML classifier ≈ merchant lookup.** Unseen merchants: 42% (ML alone), ML-only precision ~30%, confidence anti-calibrated. No feedback loop retrains on user corrections — highest-value next step
 - Model is a pickle in `backend/models/` (git-ignored): trusted-write-only; sha256 detects corruption not tampering; tied to the exact scikit-learn version; **not** baked into the Docker image. The Docker build is now exercised (pre-Phase 6), and the bind mount lets backend/worker share `python -m app.ml.train` output
@@ -790,16 +791,18 @@ decision to be where labeled data comes from.
 
 **Scope covered:** pre-Phase 6 maintenance only — close the seven repo/Phase-5 loose ends; no Phase 6 feature work.
 
-**Decisions made by Dhruv before execution:** preserve the existing GitHub remote history and push to `main`; production lockfile installed by Docker; reuse the empty dev Postgres volume/password and generate only `SECRET_KEY`; run tests in the same PG18 container; run both Phase 5 evals (blocked later by missing credentials); do all three small fixes; undismiss clears only `suggestion_dismissed`.
+**Decisions made by Dhruv before execution:** preserve the existing GitHub remote history and push to `main`; production lockfile installed by Docker; reuse the empty dev Postgres volume/password and generate only `SECRET_KEY`; run tests in the same PG18 container; run both Phase 5 evals; do all three small fixes; undismiss clears only `suggestion_dismissed`. When the supplied Gemini key failed on the Anthropic client, Dhruv chose to add Gemini as a second provider.
 
 **What was done and verified for real:**
 - `git init` against `origin/main` (remote was at Phase 4), fetched history, committed the local Phase 5 tree on top. `.gitignore` no longer ignores `docs/`, so spec + tracker + build loop are tracked. Baseline commit `21c1557`; final hardening commits pushed to `main`.
-- Created `.env` from `.env.example` with the existing volume's dev password and a random 64-char `SECRET_KEY` (not printed, not committed). API keys left blank.
-- Regenerated `backend/requirements.lock.txt` **inside the Linux image** (UTF-8, LF, 116 pins, includes scikit-learn 1.9.1/joblib 1.6.0). `Dockerfile` and `requirements-dev.txt` now install the lock. Rebuilt the image successfully.
+- Created `.env` from `.env.example` with the existing volume's dev password and a random 64-char `SECRET_KEY` (not printed, not committed). Provider keys stay out of git.
+- Regenerated `backend/requirements.lock.txt` **inside the Linux image** (UTF-8, LF, 120 pins after adding google-genai 2.33.0, includes scikit-learn 1.9.1/joblib 1.6.0). `Dockerfile` and `requirements-dev.txt` now install the lock. Rebuilt the image successfully.
 - Full `docker compose up -d --build`: backend, worker, frontend, SeaweedFS, Valkey, PG18.6 all healthy; `/health` = `api/database/cache: ok`; frontend HTTP 200.
 - Real migrations `0001→0006` on PG18.6 (native `uuidv7()`), model trained (`classifier.joblib` + meta), then end-to-end smoke: signup → login → INR account → CSV upload → extraction → normalization → enrichment → 3 transactions → `/analytics/summary` (`income 90000.00`, `expense 1550.50`, `net 88449.50`) → `/documents/{id}/pages`.
-- Full suite on PG18: **147 passed** (143 prior + 4 hardening tests). Migration test covers 0006 both up and down.
+- Full suite on PG18: **151 passed** (147 prior + 4 Gemini adapter/factory tests). Migration test covers 0006 both up and down.
 - Fixes: migration `0006_merchant_alias_uniqueness` + model flag; `GET /transactions?date_to=` half-open upper bound; `POST /transactions/{id}/suggestion/undismiss` (409 when not dismissed, only clears the flag); README links/tree/API/test counts and backend README updated.
+- Added `GeminiClassifier` + `get_llm_classifier()` and `--provider/--model` to `eval_llm`; Gemini uses the same validated JSON schema/parser as Anthropic, with bounded retries (429/5xx) and a 60 s timeout. `google-genai==2.33.0` pinned in the lock; `GEMINI_API_KEY`, `LLM_PROVIDER`, `LLM_GEMINI_MODEL` documented in `.env.example` (none committed).
+- Ran both evals for real: public OOD 12,144 rows (coverage 0.4888, precision-on-answered 0.4862, abstain-as-wrong 0.2376); Gemini 3.5 Flash-Lite n=300 on synthetic holdout (hybrid 0.9133, LLM 0.9433, 0 abstentions). Artifacts: `backend/docs/ml_eval/public_ood.json`, `llm_synthetic.json`.
 
 **Findings / corrections:**
 - Host PowerShell could not reach `api.anthropic.com`/`huggingface.co` (timeouts), but the backend container could: Anthropic returned 401 (reachable, no key), HF returned 200. The earlier “network blocked” assumption was a host-only limitation, not a project one.
@@ -807,12 +810,12 @@ decision to be where labeled data comes from.
 - Smoke initially showed uncategorized rows: the enrich task had not finished yet (it completed ~1s after normalization). Not a bug — the chain timing is expected; re-query showed `category_source='hybrid'` on all three.
 - Four new tests explain 143 → 147 (0006 round-trip, date filter, undismiss, plus the undismiss endpoint added to the auth-isolation parameterization).
 
-**Not done / still blocked:**
-- `python -m app.ml.eval_llm --n 300` needs `ANTHROPIC_API_KEY` in `.env` (container path verified).
-- `python -m app.ml.eval_public --limit 20000` needs `HF_TOKEN` after accepting the gated dataset terms.
+**Not done / still unverified:**
+- Anthropic path (`claude-haiku-5-5`) has never been called; only Gemini is verified.
+- Public OOD is a lossy-map signal, not an accuracy benchmark; real-statement accuracy remains unknown.
 - Model is still not baked into the image; it is trained once into the bind-mounted `backend/models/`.
 
-**State at end of session:** existing project is clean, reproducible, verified on PG18, and ready for Phase 6 once the two eval credentials are supplied. Next: **Phase 6 — Forecasting**.
+**State at end of session:** both evals are run and recorded, all 151 tests pass on PG18, and the tree is ready for Phase 6. Next: **Phase 6 — Forecasting**.
 
 <!-- Next session: append a new "### Session N — YYYY-MM-DD" block below,
      update the Phase Roadmap checkboxes, and add any new rows to the

@@ -6,7 +6,7 @@ compute (and don't), and how to run the test suite. For the project-level
 overview see the [root README](../README.md); for decisions and history see
 [`PROGRESS_TRACKER.md`](../PROGRESS_TRACKER.md).
 
-**Status: Phases 0–5 of 13 built.** Classical ML (scikit-learn) and statistical detectors exist; no LLM call runs anywhere (an unverified, off-by-default interface exists).
+**Status: Phases 0–5 of 13 built.** Classical ML (scikit-learn) and statistical detectors exist. An opt-in LLM classifier (Anthropic + Gemini adapters) is available but off by default; the Gemini adapter was run against the real API for evaluation, the Anthropic adapter remains unverified.
 
 ---
 
@@ -68,7 +68,7 @@ backend/
 │   │   ├── synthetic.py eval.py train.py eval_llm.py eval_public.py
 │   │   └── (models/ is git-ignored: `python -m app.ml.train` writes classifier.joblib + .meta.json)
 │   └── pipeline/        extractors/ (Phase 2)  normalize/ (Phase 3)  tasks.py
-├── docs/ml_eval/        report.md / report.json from `python -m app.ml.eval`
+├── docs/ml_eval/        synthetic CV (report.md/json), public OOD, real Gemini run
 ├── tests/               real-Postgres pytest suite (see "Testing")
 ├── pytest.ini  requirements.txt  requirements-dev.txt  Dockerfile  alembic.ini
 ```
@@ -183,6 +183,11 @@ Every step is idempotent, user-scoped, and serialized per user by a Postgres adv
 - **Model lifecycle.** `python -m app.ml.train` → synthetic data → `models/classifier.joblib` + `.meta.json` (sha256, sklearn version, metrics). If the file is missing, corrupt, or from a different scikit-learn version, the system degrades to **rules-only** and says so in `GET /ml/status` instead of failing. Pickle caveat: trusted-write directory only.
 - **Training data is synthetic** (`ml/synthetic.py`, ~240 merchants, Indian-bank-style narrations). Evaluation holds out whole merchants.
 
+### Phase 5 evaluation results
+- **Synthetic holdout** (merchant-grouped CV): rules 82%, ML-only 42%, hybrid 86% accuracy (abstentions count as wrong).
+- **Public OOD** (`docs/ml_eval/public_ood.json`, 12,144 mapped rows): 48.9% coverage, 48.6% precision on answered, 23.8% accuracy counting abstentions as wrong. The label map is lossy; treat this as a warning signal, not a benchmark.
+- **LLM** (`docs/ml_eval/llm_synthetic.json`, Gemini 3.5 Flash-Lite, n=300, 25 per request): 94.3% accuracy vs 91.3% for hybrid on the same synthetic holdout, 0 abstentions. Synthetic merchants flatter every method; this does not establish real-statement accuracy.
+
 ### Duplicates
 Compared only within the same account, currency, direction and exact amount, within 3 days.
 `score = 0.45·date + 0.35·narration similarity + 0.20·cross-document`, ×0.25 if both narrations carry
@@ -210,12 +215,12 @@ The 0.15 floor means a flat baseline needs a ≥2.2× jump to flag.
 4. Deleting a user with 100k transactions took >15 min: unindexed self-referencing FKs (`duplicate_of_id`, new `duplicate_candidate_of_id`). Partial indexes added in 0005.
 
 ### Phase 5 tests
-87 new tests (83 Phase 5 + 4 pre-Phase 6 hardening): `tests/test_ml_units.py` (pure algorithms: rule ordering, Salary-credit constraint, hybrid override, persistence failure modes,
-cadences, price rise, skipped month, chance clusters, duplicate thresholds/refs/habits/triplicates, anomaly floors/fallbacks/currency separation, LLM parser abuse cases),
+91 new tests (87 Phase 5 + 4 pre-Phase 6 hardening): `tests/test_ml_units.py` (pure algorithms: rule ordering, Salary-credit constraint, hybrid override, persistence failure modes,
+cadences, price rise, skipped month, chance clusters, duplicate thresholds/refs/habits/triplicates, anomaly floors/fallbacks/currency separation, LLM parser abuse cases, Gemini batching/structured output/factory),
 `tests/test_ml_service_api.py` (real Postgres + HTTP: auto vs suggest, user-final, reject-sticks, force semantics, duplicates through analytics, human decisions surviving re-runs,
 exact recurring totals, concurrent runs, cross-user isolation, 401s, the Celery task body) and the 0005 backfill/constraint/round-trip test. Verified separately (not in the suite):
 a real Celery worker on a real Redis broker running normalize → enrich; and the 100k-row timing run.
-The LLM tests use a stand-in client for *batching plumbing only* — they are not evidence that the real API works.
+The LLM unit tests use stand-in clients for *batching/parsing plumbing*. The real API evidence is the committed Gemini eval result (`docs/ml_eval/llm_synthetic.json`); the Anthropic path still has none.
 
 ---
 
@@ -297,7 +302,7 @@ export TEST_DATABASE_URL=postgresql+psycopg://finsight:finsight_dev_password@loc
 pytest
 ```
 
-What's covered (Phase 4 portion, 60 of 147 tests; Phase 5 coverage is described above): exact-decimal sums (1000 × 0.10 = 100.00); currency
+What's covered (Phase 4 portion, 60 of 151 tests; Phase 5 coverage is described above): exact-decimal sums (1000 × 0.10 = 100.00); currency
 separation; inclusive date boundaries, month/year/leap-day edges; gap-filled
 monthly series and partial flags; zero-denominator percentages; duplicate
 exclusion; category/merchant/account breakdowns incl. ties and `limit`; budget

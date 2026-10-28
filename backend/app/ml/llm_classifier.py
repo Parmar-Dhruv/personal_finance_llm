@@ -1,17 +1,17 @@
 """
-LLM transaction classifier -- INTERFACE ONLY, NOT VERIFIED AGAINST THE REAL API.
+LLM transaction classifier -- two adapters, opt-in, measured with a real key.
 
-Status, stated plainly: the sandbox this phase was built in has no
-ANTHROPIC_API_KEY, so no request in this file has ever reached the real API.
-What IS tested for real: the prompt/tool-schema construction and the response
-parser (pure functions, tests/test_ml_llm_interface.py). What is NOT: the
-network call, the model id in settings (`llm_classifier_model` is a best
-guess), latency, cost, and accuracy. Run `python -m app.ml.eval_llm` with a
-key to measure it on the same rows as rules/ML before relying on it.
+Providers: Anthropic (`LLMClassifier`) and Gemini (`GeminiClassifier`), chosen
+explicitly with `LLM_PROVIDER`. Gemini's `gemini-3.5-flash-lite` path was
+verified against the real API and evaluated (n=300); the Anthropic model id in
+settings (`claude-haiku-5-5`) is still unconfirmed because no Anthropic key
+was available. The prompt, schema, batching and response parser are shared, so
+an injected instruction can at worst pick a wrong label -- never free text or
+a tool call. Run `python -m app.ml.eval_llm` to reproduce the comparison.
 
 Design points that don't depend on the network:
 * Opt-in (`settings.llm_classifier_enabled`, default False): transaction
-  narrations leave the machine for the Anthropic API, and narrations can
+  narrations leave the machine for the selected provider, and narrations can
   contain names and account fragments. Nothing here is on by default.
 * Narrations are UNTRUSTED text that could contain "ignore previous
   instructions". The model is forced to answer through a tool whose input
@@ -23,6 +23,9 @@ Design points that don't depend on the network:
 """
 
 from __future__ import annotations
+
+import json
+import time
 
 from app.core.config import settings
 from app.ml.classifier import Prediction
@@ -66,6 +69,11 @@ def tool_schema() -> dict:
             "required": ["results"],
         },
     }
+
+
+def json_schema() -> dict:
+    """The same validated shape, expressed as a Gemini structured-output schema."""
+    return tool_schema()["input_schema"]
 
 
 def build_user_message(items: list[tuple[str, str | None, str, float]]) -> str:
@@ -120,3 +128,71 @@ class LLMClassifier:
             tool_input = next((b.input for b in resp.content if getattr(b, "type", None) == "tool_use"), {})
             out.extend(parse_tool_input(tool_input, chunk))
         return out
+
+
+class GeminiClassifier:
+    """Gemini adapter with the same `classify(items)` contract as LLMClassifier."""
+
+    def __init__(self, client=None, model: str | None = None):
+        if client is None:
+            if not settings.gemini_api_key:
+                raise RuntimeError("GEMINI_API_KEY is not set")
+            from google import genai  # imported lazily: only needed for this provider
+            from google.genai import types
+
+            # Disable the SDK's own multi-minute retry loop; the bounded loop in
+            # classify() is easier to reason about and cannot hang an eval.
+            client = genai.Client(
+                api_key=settings.gemini_api_key,
+                http_options=types.HttpOptions(
+                    timeout=60_000,
+                    retry_options=types.HttpRetryOptions(attempts=1),
+                ),
+            )
+        self.client = client
+        self.model = model or settings.llm_gemini_model
+
+    def classify(self, items: list[tuple[str, str | None, str, float]]) -> list[Prediction | None]:
+        from google.genai import errors as genai_errors
+        from google.genai import types
+
+        out: list[Prediction | None] = []
+        for start in range(0, len(items), BATCH_SIZE):
+            chunk = items[start : start + BATCH_SIZE]
+            for attempt in range(4):
+                try:
+                    resp = self.client.models.generate_content(
+                        model=self.model,
+                        contents=build_user_message(chunk),
+                        config=types.GenerateContentConfig(
+                            system_instruction=SYSTEM_PROMPT,
+                            temperature=0.0,
+                            max_output_tokens=2048,
+                            response_mime_type="application/json",
+                            response_schema=json_schema(),
+                        ),
+                    )
+                    break
+                except (genai_errors.ClientError, genai_errors.ServerError) as exc:
+                    # 503/429 spikes are routine on the free tier; retry them only.
+                    if getattr(exc, "code", None) not in (429, 500, 502, 503, 504) or attempt == 3:
+                        raise
+                    time.sleep(2**attempt)
+            try:
+                payload = json.loads(resp.text or "")
+            except (TypeError, ValueError):
+                payload = {}
+            out.extend(parse_tool_input(payload, chunk))
+        return out
+
+
+def get_llm_classifier(
+    provider: str | None = None, model: str | None = None, client=None
+) -> LLMClassifier | GeminiClassifier:
+    """Select the adapter explicitly (`LLM_PROVIDER`) rather than guessing from a key."""
+    chosen = (provider or settings.llm_provider or "anthropic").lower()
+    if chosen == "anthropic":
+        return LLMClassifier(client=client, model=model)
+    if chosen == "gemini":
+        return GeminiClassifier(client=client, model=model)
+    raise ValueError(f"Unknown LLM provider: {chosen!r} (expected 'anthropic' or 'gemini')")

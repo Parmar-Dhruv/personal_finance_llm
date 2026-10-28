@@ -1,0 +1,18 @@
+{
+  "dataset": "mitulshah/transaction-categorization",
+  "dataset_access": "gated; requires authenticated HF account that accepted the terms",
+  "generated_at": "2026-10-28",
+  "command": "python -m app.ml.eval_public --limit 20000",
+  "mode": "rules+ml",
+  "rows_requested": 20000,
+  "rows_mapped": 12144,
+  "label_map": "lossy; categories without a counterpart were dropped (Financial Services, Income, Government & Legal, Charity & Donations)",
+  "coverage": 0.4888,
+  "accuracy_abstain_wrong": 0.2376,
+  "precision_on_answered": 0.4862,
+  "caveats": [
+    "Out-of-distribution signal only, not a benchmark: the public label taxonomy does not match this project's ten categories.",
+    "The dataset card is MIT-labelled but mixes synthetic and unnamed external sources.",
+    "The model was trained on this project's own synthetic merchants; this is the first non-synthetic-ish check, not proof of real-statement accuracy."
+  ]
+}

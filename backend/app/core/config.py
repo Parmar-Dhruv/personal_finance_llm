@@ -32,15 +32,21 @@ class Settings(BaseSettings):
     )
 
     anthropic_api_key: str | None = None
+    gemini_api_key: str | None = None
     voyage_api_key: str | None = None
 
     # Phase 5. Empty = <backend>/models. The model file is a pickle: only ever
     # point this at a directory this application (or you) wrote.
     ml_model_dir: str = ""
-    # Opt-in: sends transaction narrations to the Anthropic API. Off by default.
+    # Opt-in: sends transaction narrations to the selected provider. Off by default.
     llm_classifier_enabled: bool = False
-    # UNVERIFIED model id (no API key in the build sandbox) -- confirm before enabling.
+    # "anthropic" | "gemini". Both adapters exist; the pipeline stays opt-in.
+    llm_provider: str = "anthropic"
+    # UNVERIFIED Anthropic model id (no key in the build sandbox) -- confirm before enabling.
     llm_classifier_model: str = "claude-haiku-5-5"
+    # 2.5 Flash is closed to new keys; 3.5/3.8 Flash hit free-tier 503s during
+    # the eval. 3.5 Flash-Lite completed n=300 on 2026-10-28. Override per run.
+    llm_gemini_model: str = "gemini-3.5-flash-lite"
 
     backend_cors_origins: str = "http://localhost:3000"
 
