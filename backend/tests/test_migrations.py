@@ -45,7 +45,7 @@ def _scalar(engine, sql):
 
 def test_full_chain_and_roundtrip(engine):
     alembic("upgrade", "head")
-    assert _scalar(engine, "SELECT version_num FROM alembic_version") == "0006_merchant_alias_uniqueness"
+    assert _scalar(engine, "SELECT version_num FROM alembic_version") == "0007_account_balance"
     assert _scalar(engine, "SELECT count(*) FROM categories WHERE is_system AND user_id IS NULL") == 10
 
     # Phase 4 constraints, exercised in raw SQL
@@ -125,4 +125,32 @@ def test_0006_merchant_alias_scope_uniqueness(engine):
         c.execute(text(insert))  # plain UNIQUE treats NULL user_id rows as distinct
     with engine.begin() as c:
         c.execute(text("DELETE FROM merchant_aliases WHERE pattern='^uniqueness-probe'"))
+    alembic("upgrade", "head")
+
+
+def test_0007_account_balance_pairing_backfill_and_roundtrip(engine):
+    """0007 adds a nullable balance pair enforced both-or-neither; existing accounts stay valid; fully reversible."""
+    alembic("upgrade", "head")
+    alembic("downgrade", "0006_merchant_alias_uniqueness")
+    with engine.begin() as c:  # an account that pre-dates the columns
+        c.execute(text("INSERT INTO users (email, hashed_password) VALUES ('b7@x.com', 'h')"))
+        uid = c.execute(text("SELECT id FROM users WHERE email='b7@x.com'")).scalar()
+        c.execute(text("INSERT INTO accounts (user_id, name, account_type, currency) VALUES (:u,'old','checking','INR')"), {"u": uid})
+
+    alembic("upgrade", "head")
+    assert _scalar(engine, "SELECT version_num FROM alembic_version") == "0007_account_balance"
+    with engine.connect() as c:
+        row = c.execute(text("SELECT opening_balance, balance_as_of FROM accounts WHERE name='old'")).one()
+    assert row.opening_balance is None and row.balance_as_of is None  # pre-existing rows: "no balance known"
+
+    with engine.begin() as c:  # a complete pair is accepted, negative included
+        c.execute(text("UPDATE accounts SET opening_balance=-5000.50, balance_as_of='2026-06-30' WHERE name='old'"))
+    for bad in ("UPDATE accounts SET opening_balance=1, balance_as_of=NULL", "UPDATE accounts SET opening_balance=NULL, balance_as_of='2026-01-01'"):
+        with pytest.raises(IntegrityError):
+            with engine.begin() as c:
+                c.execute(text(bad))
+
+    alembic("downgrade", "0006_merchant_alias_uniqueness")
+    assert _scalar(engine, "SELECT count(*) FROM information_schema.columns WHERE table_name='accounts' AND column_name IN ('opening_balance','balance_as_of')") == 0
+    assert _scalar(engine, "SELECT count(*) FROM accounts WHERE name='old'") == 1  # the account itself survives
     alembic("upgrade", "head")

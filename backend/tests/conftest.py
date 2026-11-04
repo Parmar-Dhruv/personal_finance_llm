@@ -103,6 +103,9 @@ class User:
     def patch(self, url, **kw):
         return self.client.patch(url, headers=self.headers, **kw)
 
+    def put(self, url, **kw):
+        return self.client.put(url, headers=self.headers, **kw)
+
     def delete(self, url, **kw):
         return self.client.delete(url, headers=self.headers, **kw)
 

@@ -1,11 +1,12 @@
 import enum
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -113,6 +114,14 @@ class User(TimestampMixin, Base):
 
 class Account(TimestampMixin, Base):
     __tablename__ = "accounts"
+    __table_args__ = (
+        # Phase 6: a balance without the date it was true on (or the reverse) is
+        # unusable, so the DB refuses it rather than trusting the API alone.
+        CheckConstraint(
+            "(opening_balance IS NULL) = (balance_as_of IS NULL)",
+            name="ck_account_balance_pair",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=PK_DEFAULT
@@ -130,6 +139,12 @@ class Account(TimestampMixin, Base):
     # the analytics layer, not here.
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Phase 6. User-supplied, signed (negative = money owed, e.g. a credit card),
+    # true at the END of balance_as_of: transactions dated after that day are
+    # added on top by the forecast; ones on or before it are already inside it.
+    # Both NULL means "no balance known" and the forecast falls back to flows only.
+    opening_balance: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    balance_as_of: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="accounts")
     documents: Mapped[list["Document"]] = relationship(back_populates="account")

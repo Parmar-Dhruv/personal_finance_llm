@@ -33,16 +33,18 @@ finsight/
       main.py
       core/ (config.py, security.py, storage.py, celery_app.py)
       db/ (base.py, models.py)
-      schemas/ (auth.py, document.py, account.py, transaction.py, category.py, budget.py, analytics.py, ml.py)
-      api/ (auth.py, documents.py, accounts.py, transactions.py, categories.py, budgets.py, analytics.py, ml.py, deps.py)
+      schemas/ (auth.py, document.py, account.py, transaction.py, category.py, budget.py, analytics.py, ml.py, forecast.py)
+      api/ (auth.py, documents.py, accounts.py, transactions.py, categories.py, budgets.py, analytics.py, ml.py, forecast.py, deps.py)
       analytics/ (common.py, cashflow.py, breakdowns.py, budgets.py, recurring.py)   # Phase 4/5, no FastAPI imports
       ml/ (taxonomy, rules, classifier, duplicates, recurring, anomalies, service, synthetic, eval, train, llm_classifier, eval_llm, eval_public)   # Phase 5
+      forecast/ (methods, backtest, schedule, history, engine, eval, README.md)   # Phase 6, no FastAPI imports
       pipeline/
         tasks.py
         extractors/ (common.py, ocr.py, pdf.py, image.py, spreadsheet.py)
         normalize/ (dates.py, amounts.py, merchants.py, columns.py, engine.py)
-    tests/ (conftest.py + 10 test modules, 151 tests, real Postgres)      # Phase 4: 60, Phase 5: +91
+    tests/ (conftest.py + 13 test modules, 264 tests, real Postgres)      # Phase 4: 60, Phase 5: +91, Phase 6: +113
     docs/ml_eval/ (report.md/json, public_ood.json, llm_synthetic.json)  # Phase 5 evals
+    docs/forecast_eval/ (report.md/json)                                 # Phase 6 eval
     README.md, pytest.ini, requirements-dev.txt
   frontend/
     package.json, tsconfig.json, next.config.mjs, Dockerfile
@@ -134,8 +136,12 @@ verified. 🔶 = in progress. ⬜ = not started.
   - ✅ UTF-8 production lockfile; Dockerfile/dev requirements install it
   - ✅ MerchantAlias uniqueness, inclusive `date_to`, suggestion undismiss
   - ✅ `eval_llm` / `eval_public` both run with user-supplied credentials; artifacts committed
-- **Phase 6 — Forecasting** ⬜
-  - ⬜ Baseline statistical forecast, then ML forecast benchmarked against it
+- **Phase 6 — Forecasting** ✅ (synthetic-data evaluation only, see Known Gaps)
+  - ✅ `GET /forecast/cashflow`: per-currency income / expense / net, 1–12 months, recurring schedule + backtest-selected statistical variable forecast, intervals, assumptions, warnings
+  - ✅ Starting balance (`PUT/DELETE /accounts/{id}/balance`, migration 0007) → projected period-end balance + covered / at_risk / shortfall / unknown verdict
+  - ✅ Baselines (naive, MA3/6, median-12, drift, seasonal naive) + ETS (statsmodels) compared by rolling-origin backtest; model leaderboard returned with every forecast
+  - ✅ ML benchmark: pooled GBM, **eval-only by decision**; did not beat the shipped pipeline on synthetic data (`docs/forecast_eval/`)
+  - ⬜ Not done: validation on real statements; budget projection (Phase 9); scenario inputs; stored forecast history
 - **Phase 7 — RAG** ⬜
   - ⬜ Voyage `voyage-context-4` embedding pipeline into pgvector
     (extension already enabled in Phase 0 migration, unused until now)
@@ -207,6 +213,16 @@ verified. 🔶 = in progress. ⬜ = not started.
 | Local env/DB (pre-Phase 6) | Reuse the existing `finsight_dev_password` volume (empty), generate only a random `SECRET_KEY`; create `finsight_test` + `finsight_migration_test` in the same PG18 container | Reset volumes with a new password / separate test container | Volumes already existed and held no data; the test suite and compose defaults already use that password |
 | Pre-Phase 6 hardening | Migration 0006 for `MerchantAlias` `UNIQUE NULLS NOT DISTINCT`; `GET /transactions?date_to=` half-open; `suggestion/undismiss` endpoint | Carry them into Phase 6 as known gaps | All three were small, isolated, and easier to verify before Phase 6 adds another migration |
 | Phase 5 eval execution | User runs `eval_llm` with their key; `eval_public` needs an authenticated HF account because the dataset is gated | Run them in this session without a key/token | Network works from the container, but no Anthropic key is present and HF requires accepted terms + token. **Update (Session 6):** user supplied Gemini + HF credentials; both evals run and recorded |
+| Starting balance (Phase 6) | User-supplied `Account.opening_balance` (signed) + `balance_as_of` (end of that day), CHECK both-or-neither (migration 0007); projection only if EVERY account with transactions in that currency has one | Flow-only forecast; parse the statement's running-balance column (reopens Phase 3) | Dhruv's call (recommended). Nothing in the schema carried a balance, yet spec §10/§13 need one for "can I afford next month". Cost: a wrong typed balance gives wrong projections, and nothing reconciles it |
+| Forecast architecture (Phase 6) | Recurring series projected on their dates + statistical forecast of the non-recurring remainder | Pure time series on monthly totals | Dhruv's call (recommended). Matches spec §13's steps and can name upcoming bills. Cost: inherits recurring-detection misses/false positives; recurring is re-detected at the forecast origin instead of read from stored rows (those would leak the future into a what-if `as_of`) — my call |
+| Forecast models (Phase 6) | Baselines + ETS in the product path, chosen per series by rolling-origin backtest; GBM benchmarked in an eval script only | ETS-only; baselines only (no new dependency) | Dhruv's call (recommended). Per-user monthly series are 3–36 points; a pooled model needs other users' data or synthetic data. **Result:** pooled GBM did not beat the shipped pipeline (+0.029 MASE, CI [−0.023, +0.078]), supporting eval-only |
+| Forecast library (Phase 6) | `statsmodels` 0.15.0 (BSD-3, `ETSModel`) | `statsforecast` 2.1.1 | My call (stated before Dhruv's choice, whose option text named statsmodels). statsforecast is Apache-2.0 but adds fugue/utilsforecast/coreforecast, pins `pandas<3`, and targets thousands of series, not one short series per request. Currency from PyPI JSON (search returned only link lists). Needed `wrapt` 2.5.2 pinned explicitly: the sandbox had pulled a **dev pre-release** (2.6.0.dev1), which was replaced by the latest stable and the forecast tests re-run |
+| Forecast metrics (Phase 6) | MAE, RMSE, MASE (scaled by in-sample one-step naive MAE) | MAPE | My call: MAPE is undefined at zero, which monthly series hit. Sourcing caveat: the Hyndman page I fetched names MASE but does not itself recommend it over MAPE |
+| Forecasts not stored (Phase 6) | Computed per request, nothing persisted | A `forecasts` table (spec §5 lists "Forecasts" as a stored entity) | My call, **a deviation from the spec's data model**: a forecast is a pure function of transactions, balances and parameters, so a stored copy only goes stale on the next upload. Cost: no history of past forecasts to score against what happened |
+| Intervals (Phase 6) | Empirical (m+1)-adjusted quantile of the selected model's own absolute backtest errors per step; borrowed (and labelled) when <5 errors; combined across income/expense/months in quadrature | Parametric intervals from the model | My call. No distributional assumption. Single-series coverage measured on synthetic data (79.5–83.0 % vs 80 % nominal); the quadrature combination is **not** validated |
+| Selection rule (Phase 6) | Lowest backtest MAE; ties within 2 % go to the simplest; method eligible only if scored on max(4, min(8, n−3)) common origins | Pure lowest MAE; AIC | My call; 2 % is a convention. Sensitivity (tolerance 0 / 2 / 5 %): auto MASE 1.0476 / 1.0465 / 1.0462, i.e. irrelevant here, default left unchanged rather than retuned on the corpus the claims come from |
+| History cleaning (Phase 6) | Drop the partial origin month; drop a late-starting first month (first txn after day 7, if ≥3 months remain); a month with NO transactions is a missing statement, not zero spending (use only the history after the newest hole) | Zero-fill gaps (as Phase 4's display series does) | My call; each rule prevents a specific bias toward "spending collapsed". The day-7 threshold is a heuristic |
+| Verdict (Phase 6) | On the first full month's end balance: `shortfall` if the point is negative, `at_risk` if the lower interval bound is negative, `unknown` when unsupported (no/partial balance, too little history) | A boolean "can afford" | My call. A yes/no hides the uncertainty the interval carries |
 
 ---
 
@@ -361,6 +377,26 @@ verified. 🔶 = in progress. ⬜ = not started.
 - Phase 3 merchant cleaning leaves IFSC-style codes in NEFT merchants ("Hdfc0001234-Infosys Ltd-Salary")
 - Celery chain verified with a real worker + real Redis (not Valkey, not SeaweedFS/OCR in that run — documents were simulated as in Phase 3)
 - ~~Postgres 16 again (not 18)~~ **Also verified on PG18 pre-Phase 6**: 151 tests + migrations 0001→0006 on the real PG18.6 container, native `uuidv7()` (polyfill remains test-only for older DBs)
+
+### Added in Phase 6
+
+- **Origin = last transaction date.** A user whose last transaction isn't on its month's final day has that month dropped from the history as "partial" (one month less data) and gets a prorated stub month. Conservative but lossy; `as_of` can only move the origin earlier
+- **Balance/net intervals are not validated**: months and income/expense are combined in quadrature assuming independent errors. Only single-series intervals were checked (synthetic data, 77.5–84.4 % vs 80 % nominal by history length). Real coverage is probably lower
+- **Everything measured is synthetic and same-author** (six archetypes the author chose; MASE, coverage, the GBM comparison). Nothing has been run on real statements. Expect worse
+- **Selector ≈ always level-ETS**: paired MASE difference +0.010 [−0.030, +0.052] on one corpus, −0.048 [−0.102, +0.004] on another. Selection protects against bad fixed choices but captures little of the hindsight headroom (oracle 0.727 vs 1.107)
+- **The starting balance is whatever the user typed**; nothing reconciles it with statements (Phase 3 doesn't parse a running-balance column). Negative = money owed; credit limits are not modelled
+- A projected balance needs a balance on **every** account with transactions in that currency; otherwise balances are withheld and the verdict is `unknown`
+- **Only period-end balances**: a big bill early in a month can overdraw an account that ends the month positive; invisible here
+- **Transfers and card-bill payments are counted as income/expense** (Phase 4/5 gap, now feeding forecasts). For someone who pays a card from checking this can badly distort both
+- Recurring misses (dates wandering > ±4.5 days) land in the variable forecast; false positives are projected as bills. Rows with no `merchant_normalized` can never be recurring. Variable-amount bills use their typical amount with no band
+- Month-end payments: projected date clamps and the clamp persists (28 Feb → 28 Mar). Always the right month, so totals are unaffected, but the displayed day can be early
+- No seasonality below ~20 months (seasonal naive) / 44 months (seasonal ETS); annual bills show up only as a yearly recurring series (≥2 occurrences)
+- Additive ETS only; no covariates, no scenario inputs, no budget projection (Phase 9); multi-account currencies are forecast pooled unless `account_id` is given
+- **Forecasts aren't stored** (decision), so there is no record of how past forecasts fared against reality: the natural next evaluation once real data exists
+- Request-time compute, no caching: measured 1 / 75 / 119 / 221 / 391 ms per series at 12 / 18 / 24 / 36 / 48 months (sandbox, single thread); a currency needs two series
+- UTC months, and "today" for the stale-data warning (> 35 days) is UTC
+- **Verified on Postgres 16 only** (no Docker daemon in the build sandbox, so PG18.6 and the rebuilt image were not exercised this session). Migration 0007 is plain DDL; run the suite in your PG18 stack to confirm
+- Phase 6 added `statsmodels` and four transitive pins (formulaic, interface_meta, patsy, wrapt) to `requirements.lock.txt`; the Docker image was **not** rebuilt with the new lock here
 
 ---
 
@@ -818,6 +854,36 @@ decision to be where labeled data comes from.
 - Model is still not baked into the image; it is trained once into the bind-mounted `backend/models/`.
 
 **State at end of session:** both evals are run and recorded, all 151 tests pass on PG18, and the tree is ready for Phase 6. Next: **Phase 6 — Forecasting**.
+
+### Session 7 — 2026-10-31 to 2026-11-04
+
+**Scope covered:** Phase 6 (full) — cash-flow forecasting. Started from the repo as pushed after Phase 5 (6 commits of Dhruv's own: lockfile, migration 0006, Gemini adapter, eval artifacts, docs), baseline re-verified before any change: **151 tests passing**.
+
+**Research → decisions (⏸ surfaced, decided by Dhruv, all recommended options):** starting balance (user-supplied opening balance), architecture (recurring schedule + statistical residual), model scope (baselines + ETS; GBM eval-only). Findings that shaped them: the schema had **no balance data**; per-user monthly series are too short for per-user ML (Hyndman: no justification for a "30 observations" rule, seasonality costs m−1 degrees of freedom, AIC favours very simple models on short series; use rolling-origin CV). Library currency from PyPI JSON: statsmodels 0.15.0, statsforecast 2.1.1, scikit-learn 1.9.1 (the web searches returned only link lists for the libraries).
+
+**What was built:** migration `0007_account_balance` (nullable `opening_balance`/`balance_as_of` + both-or-neither CHECK); `PUT/DELETE /accounts/{id}/balance`; `app/forecast/` (methods, backtest, schedule, history, engine, eval) + `GET /forecast/cashflow` + schemas; `statsmodels` and pins added to requirements; package README, root README and backend README updated (including stale Phase 5 claims fixed: UTF-16 lockfile / unexercised Docker build / a broken tracker link); synthetic evaluation harness and committed report.
+
+**Tested for real:** **264 tests pass** (151 prior + 76 forecast unit + 33 forecast API + 3 eval-harness + 1 migration) on real Postgres 16 with real Alembic migrations and real HTTP. Migration 0007 up → down → up with model/schema drift check (none). Coverage includes a **seam test through the real Phase 3 normalizer and Phase 5 enrichment**, a 40-seed fuzz of numeric invariants (net = income − expense, balance chain, interval ordering, cent quantization), hand-derived expected values, cross-user isolation, 401s, validation (NaN/Infinity, 3 dp, Numeric(14,2) boundary both ways, future dates), duplicates ignored, `as_of` what-if, 12-month horizon. Celery is not involved (computed on request).
+
+**Test-premise / expectation errors found and corrected (not retrofitted):**
+1. n=8 history: I expected 4 backtest origins; the rule gives max(4, min(8, 8−3)) = 5 (checked against the code, then the test was fixed).
+2. My history helper put transactions on day 10, which triggers the (designed) leading-partial-month rule; another test set `as_of` past the data, correctly creating a "hole". Fixtures fixed, code unchanged.
+3. My seed data ended each month on the 20th, so the engine treated the last month as partial; that exposed a real consequence (documented gap above).
+4. A "Numeric overflow" example (100000000000.00) is actually valid (12 integer digits); a migration test counted another test's leftover account.
+5. The seam test's premise was wrong: a once-a-month purchase is, correctly, a recurring bill; the assertion `1000 < variable < 4000` had passed only by luck (real value 1,020). Rewritten with hand-derived values (median(1110, 900, 970) = 970).
+6. I had assumed `drift` needs 10 months in the selector; computing it from the code gives 12.
+
+**Real bugs/findings:** (a) every salaried user got a false warning "every usable month is 0" on income → now only in the model summary; (b) `statsmodels` had not been added to the lockfile the Docker image installs (ETS would have failed at runtime and silently shrunk the model menu) → added with exact tested pins; (c) a **dev pre-release of `wrapt` (2.6.0.dev1)** had been pulled in transitively → replaced by stable 2.5.2 and the forecast tests re-run; (d) I never compared the selector with "always ETS" until late: it is a **tie**; (e) I predicted selection optimism would make intervals too narrow, coverage was close to nominal on synthetic data → docstring corrected; (f) I suspected the 2 % tie-break hurt: sensitivity says it doesn't matter.
+
+**Evaluation (synthetic, 600 series, seed 7):** auto MASE 1.107 vs naive 1.204 (diff −0.097, CI [−0.152, −0.041]), vs MA3 −0.086, vs median-12 −0.218, vs ets_ann +0.010 [−0.030, +0.052] (tie); GBM − auto +0.029 [−0.023, +0.078]; hindsight oracle 0.727; interval coverage 83.0 / 81.8 / 79.5 % at steps 1/2/3. Second corpus (seed 11, 400 series): auto vs ets_ann −0.048 [−0.102, +0.004].
+
+**Sandbox substitutions & revert check:** PG16 instead of PG18 (real pgvector from the apt package this time, no stub), Redis idle (not used), `uuidv7()` polyfill only in `tests/conftest.py` / `test_migrations.py` against `*_test` DBs. Verified: `git diff` on migrations 0001–0006 is empty; `gen_random_uuid` outside tests appears only in a pre-existing comment in `models.py`; 0007 creates no table so uses no UUID default.
+
+**Not done / unverified:** real statements; PG18.6 and a rebuilt Docker image with the new lock (no Docker daemon here); the combined balance interval; budget projection; scenario inputs; changes were **not committed or pushed** (zip delivered instead).
+
+**Edge cases identified:** no history / <3 / <7 months; all-zero series; month with no transactions (missing statement); partial origin month; late-starting first month; origin not at month-end; cancelled subscriptions (removed from history, not projected); overdue-but-pending vs skipped bills; month-end clamping and leap years; multi-currency (separate, never combined); several accounts with only some balances; balance dated after the last transaction; balance on the same day as a transaction; negative (owed) balances; far-future balance dates and IST day-ahead; duplicate-flagged rows; other users' data; stale data; 12-month horizon with scarce far-step errors; ETS non-convergence (recorded as a failed model, not a crash); a dev pre-release dependency.
+
+**State at end of session:** Phase 6 complete and verified within the caveats above. Next up: **Phase 7 — RAG** (Voyage embeddings into pgvector). Suggested before/alongside it: run the forecaster on real statements, transfer/card-payment detection (it distorts analytics *and* forecasts), and the Phase 5 follow-ups.
 
 <!-- Next session: append a new "### Session N — YYYY-MM-DD" block below,
      update the Phase Roadmap checkboxes, and add any new rows to the

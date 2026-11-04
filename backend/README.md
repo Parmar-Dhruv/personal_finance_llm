@@ -2,11 +2,11 @@
 
 FastAPI + Celery + SQLAlchemy 2 + Alembic. This README is the backend
 deep-dive: how the code is layered, exactly what the Phase 4 analytics
-compute (and don't), and how to run the test suite. For the project-level
+compute (and don't), how the Phase 5 ML layer and Phase 6 forecaster behave, and how to run the test suite. For the project-level
 overview see the [root README](../README.md); for decisions and history see
-[`PROGRESS_TRACKER.md`](../PROGRESS_TRACKER.md).
+[`PROGRESS_TRACKER.md`](../docs/PROGRESS_TRACKER.md).
 
-**Status: Phases 0–5 of 13 built.** Classical ML (scikit-learn) and statistical detectors exist. An opt-in LLM classifier (Anthropic + Gemini adapters) exists but is not wired into the pipeline; the Gemini adapter was run against the real API for evaluation, the Anthropic adapter remains unverified.
+**Status: Phases 0–6 of 13 built.** Phase 6 adds on-demand cash-flow forecasting (statistical, with intervals; no stored forecasts). Classical ML (scikit-learn) and statistical detectors exist. An opt-in LLM classifier (Anthropic + Gemini adapters) exists but is not wired into the pipeline; the Gemini adapter was run against the real API for evaluation, the Anthropic adapter remains unverified.
 
 ---
 
@@ -25,6 +25,10 @@ app/api/*          routers: parse input, authenticate, authorize (ownership → 
    │
    ├──► app/ml/*          Phase 5 – classifier, duplicate/recurring/anomaly detectors. Pure Python/sklearn;
    │                      only ml/service.py touches the DB (per-user advisory lock, never commits).
+   │
+   ├──► app/forecast/*    Phase 6 – recurring schedule + backtest-selected statistical forecast + balance projection.
+   │                      Pure functions plus one DB-reading module (history.py) and one DB wrapper (engine.forecast_cashflow).
+   │                      No FastAPI imports; reuses ml/recurring.py's detector. See app/forecast/README.md.
    │
    ├──► app/pipeline/*    Phases 2–5 – Celery tasks, extractors, normalization
    │
@@ -45,16 +49,19 @@ backend/
 │   ├── 0002_document_pages.py       DocumentPage (provenance)
 │   ├── 0003_normalization.py        normalization status, merchant_aliases + seed
 │   ├── 0004_analytics_budgets.py    budgets, category uniqueness fix, 10 system categories, indexes
-│   └── 0005_ml_layer.py             recurring_series; category/duplicate/anomaly provenance; self-FK indexes
+│   ├── 0005_ml_layer.py             recurring_series; category/duplicate/anomaly provenance; self-FK indexes
+│   ├── 0006_merchant_alias_uniqueness.py   MerchantAlias UNIQUE NULLS NOT DISTINCT
+│   └── 0007_account_balance.py      accounts.opening_balance + balance_as_of, both-or-neither CHECK (Phase 6)
 ├── app/
 │   ├── main.py
 │   ├── core/            config.py security.py storage.py celery_app.py
 │   ├── db/              base.py models.py
-│   ├── schemas/         auth account document transaction category budget analytics
+│   ├── schemas/         auth account document transaction category budget analytics ml forecast
 │   ├── api/
 │   │   ├── auth.py accounts.py documents.py transactions.py deps.py      (Phases 0–3)
 │   │   ├── categories.py budgets.py analytics.py                          (Phase 4)
-│   │   └── ml.py   (+ suggestion/duplicate actions in transactions.py)    (Phase 5)
+│   │   ├── ml.py   (+ suggestion/duplicate actions in transactions.py)    (Phase 5)
+│   │   └── forecast.py   (+ PUT/DELETE /accounts/{id}/balance in accounts.py)  (Phase 6)
 │   ├── analytics/       (Phase 4)
 │   │   ├── common.py        Scope, shared WHERE clause, money/pct helpers, month math
 │   │   ├── cashflow.py      summary() and monthly()
@@ -67,8 +74,10 @@ backend/
 │   │   ├── service.py       DB glue; enrich_user() runs all four steps in order
 │   │   ├── synthetic.py eval.py train.py eval_llm.py eval_public.py
 │   │   └── (models/ is git-ignored: `python -m app.ml.train` writes classifier.joblib + .meta.json)
+│   ├── forecast/        (Phase 6)  methods backtest schedule history engine eval  + README.md
 │   └── pipeline/        extractors/ (Phase 2)  normalize/ (Phase 3)  tasks.py
 ├── docs/ml_eval/        synthetic CV (report.md/json), public OOD, real Gemini run
+├── docs/forecast_eval/  Phase 6: synthetic backtest, GBM benchmark, interval coverage (report.md/json)
 ├── tests/               real-Postgres pytest suite (see "Testing")
 ├── pytest.ini  requirements.txt  requirements-dev.txt  Dockerfile  alembic.ini
 ```
@@ -224,6 +233,41 @@ The LLM unit tests use stand-in clients for *batching/parsing plumbing*. The rea
 
 ---
 
+## Phase 6: forecasting (summary; full detail in `app/forecast/README.md`)
+
+`GET /forecast/cashflow` computes, per currency and on every request, a forecast of income, expense and net for the rest of the
+current month plus 1–12 full months, split into **recurring** payments (Phase 5's detector re-run on data up to the forecast origin,
+projected onto calendar dates at their recent typical amount) and **variable** flow (everything else, one monthly series for expense
+and one for income). Each variable series is forecast by whichever of nine methods wins a rolling-origin backtest on that user's own
+history; intervals are empirical quantiles of the winner's own backtest errors. If every account in the currency has a user-supplied
+balance (`PUT /accounts/{id}/balance`), period-end balances and a `covered` / `at_risk` / `shortfall` / `unknown` verdict are projected.
+
+Rules worth knowing:
+- **Origin** = the last transaction on or before `as_of`, per currency. The partial origin month is excluded from the history.
+- **A month with no transactions inside the data span is treated as a missing statement, not zero spending.**
+- **Fewer than 7 usable months → no backtest, no interval** (last-3-month average); fewer than 3 → no variable forecast.
+- **No stored forecasts.** Nothing is written; cost is one backtest per series per request (≈1 ms at 12 months, ≈390 ms at 48 months).
+- Statistics (MAE, MASE, interval level) are floats; **all money is Decimal** and serialized as strings.
+
+Evaluation on synthetic series (`docs/forecast_eval/report.md`; `python -m app.forecast.eval`): the selector clearly beats naive baselines
+but **ties "always fit level-ETS"**; an eval-only pooled GBM does not beat it; single-series 80 % intervals covered 79.5–83.0 % by step.
+All synthetic and same-author. The combined net/balance intervals are not validated.
+
+### Things Phase 6 testing and evaluation caught (they changed code, tests or claims)
+1. My first seed data ended each month on the 20th, so the engine (correctly, by design) treated the last month as partial and shifted every period. That exposed a real consequence — a user whose last transaction isn't on a month's final day loses that month — now a documented gap.
+2. A salaried user's income history is all-zero variable income; the engine reported that as a *warning* on every request. It is now reported only in the model summary.
+3. Running the real Phase 3 → 5 → 6 pipeline showed a once-a-month variable-amount purchase is (correctly) detected as a recurring bill — my test had called it variable spend. Its projected *day* drifts to the 28th (month-end clamping), always in the right month.
+4. The 2 % tie-break I suspected was hurting selection turned out not to matter (auto MASE 1.0476 / 1.0465 / 1.0462 for 0 / 2 / 5 %).
+5. I predicted selection optimism would make intervals too narrow; on synthetic data coverage was close to nominal. I corrected the docstring that claimed otherwise.
+6. I never compared the selector with "always ETS" until late; the result (a tie) is now stated instead of implying selection adds accuracy.
+
+### Phase 6 tests
+`tests/test_forecast_units.py` (pure: method values by hand, eligibility, shared origins, a perfectly linear series selects drift with zero error, tolerance band, conformal quantiles and borrowing, schedule stepping/clamping/overdue rules, history cleaning rules, engine recurring-exact/variable-statistical split, balance chain and as-of-date semantics, verdicts, stub proration, plus a 40-seed random-history fuzz of numeric invariants), `tests/test_forecast_api.py`
+(real Postgres + HTTP: auth, balance validation and the Numeric(14,2) boundary, DB both-or-neither CHECK, isolation, end-to-end hand-derived numbers, currency separation, duplicates ignored, `as_of`, account filter and balance completeness, short-history degradation, 12-month horizon, and a seam test where the statement goes through the **real** normalizer and enrichment pipeline), `tests/test_forecast_eval.py` (the harness stays runnable and deterministic), and a 0007 migration round-trip test.
+Celery is not involved in Phase 6 (forecasts are computed on request).
+
+---
+
 ## Known gaps and limitations (Phase 4)
 
 Deliberate scope cuts and unfixed weaknesses, stated plainly. The rolled-up
@@ -245,13 +289,13 @@ list across all phases is in `PROGRESS_TRACKER.md` §5.
   reports the category each transaction is assigned to (no parent roll-up), while a
   budget on a parent counts its descendants. Both are documented, but they will not
   visually reconcile for nested categories.
-- **No "recurring expense totals"** (spec §8): that depends on Phase 5 recurring
-  detection; `is_recurring` is always false today.
+- ~~No "recurring expense totals" (spec §8)~~ **Delivered in Phase 5** as `GET /analytics/recurring`;
+  it is only as good as the detector (see Phase 5).
 
 **Scope cuts**
 - No currency conversion; no combined "total across currencies" (decision).
 - Budgets are calendar-monthly only: no weekly/yearly/custom periods, rollover,
-  proration, or forecast-based "will you overspend" (Phase 6).
+  proration, or forecast-based "will you overspend" (Phase 6 built the forecast; projecting budgets with it is not done — Phase 9).
 - Budget status is computed on request. Nothing *delivers* an alert (Phase 9).
 - Categories can't be renamed, moved or deleted via the API; assignment is one
   transaction at a time (no bulk). Deleting a category in the DB cascades to its
@@ -311,7 +355,7 @@ docker compose run --rm --no-deps \
   backend sh -c "pip install -q -r requirements-dev.txt && pytest"
 ```
 
-What's covered (Phase 4 portion, 60 of 151 tests; Phase 5 coverage is described above): exact-decimal sums (1000 × 0.10 = 100.00); currency
+What's covered (Phase 4 portion, 60 of 264 tests; Phase 5 and Phase 6 coverage are described above): exact-decimal sums (1000 × 0.10 = 100.00); currency
 separation; inclusive date boundaries, month/year/leap-day edges; gap-filled
 monthly series and partial flags; zero-denominator percentages; duplicate
 exclusion; category/merchant/account breakdowns incl. ties and `limit`; budget

@@ -71,3 +71,13 @@ joblib
 # still opt-in; Earth/synthetic evaluation runs offline. Verified current
 # 2026-10-28 (2.33.0) and against the real Gemini API.
 google-genai
+
+# --- Forecasting (Phase 6) ---
+# statsmodels (BSD-3): ETSModel exponential smoothing for the forecast method menu.
+# Chosen over statsforecast (Apache-2.0, heavier: fugue/utilsforecast/coreforecast,
+# pins pandas<3, built for fitting thousands of series at once, not one short series
+# per request). Current as of 2026-10-31 (0.15.0, uploaded 2026-08-27, per PyPI JSON).
+# If it is missing at runtime the ETS methods fail inside the backtest and are
+# recorded as "failed" on the leaderboard rather than crashing - which would quietly
+# shrink the model menu, so keep it in the lock.
+statsmodels
