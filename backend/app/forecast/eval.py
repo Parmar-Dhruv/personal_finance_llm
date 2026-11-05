@@ -1,7 +1,11 @@
 """
 Phase 6 evaluation on SYNTHETIC monthly series. Run:
 
-    python -m app.forecast.eval --series-per-length 60 --seed 7 --out-dir docs/forecast_eval
+    python -m app.forecast.eval --series-per-length 120 --seed 7 --out-dir docs/forecast_eval
+
+That is 120 series per train length = 600 total, which reproduces the committed
+report. `--series-per-length 60` (300 total) is a faster smoke run with different
+numbers.
 
 What this can and cannot tell you
  * The series come from six archetypes the author chose (stationary, trend,
@@ -281,7 +285,8 @@ def render_markdown(r: dict) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--series-per-length", type=int, default=60)
+    ap.add_argument("--series-per-length", type=int, default=120,
+                    help="series per train length; 120 = 600 total (committed report), 60 = 300 (quick run)")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--gbm-series", type=int, default=600)
     ap.add_argument("--out-dir", default="docs/forecast_eval")
